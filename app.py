@@ -74,9 +74,12 @@ def build_table(df, header_row):
 
 
 def find_col(cols, key, required=True):
-    for col in cols:
-        if any(s in norm_text(col) for s in CFG["columns"][key]):
-            return col
+    # синонимы проверяются по приоритету: первый синоним важнее
+    # порядка колонок в файле
+    for syn in CFG["columns"][key]:
+        for col in cols:
+            if syn in norm_text(col):
+                return col
     if required:
         raise ValueError(f"Колонка '{key}' не найдена. Есть: {list(cols)}")
     return None
@@ -304,8 +307,9 @@ def build_main_table(zag, sum_by_doc, spec_by_doc, unic_by_doc, perv_by_doc,
     df["Стоимость оказанных услуг(руб)"] = df["key"].map(sum_by_doc).fillna(0)
     df["Специализация"] = df["key"].map(
         spec_by_doc if spec_by_doc is not None else {}).fillna(df["Специализация"])
-    df["Кол-во пациентов"] = df["key"].map(svod_by_doc).fillna(
-        df["key"].map(unic_by_doc).fillna(0)).astype(int)
+    # по ТЗ: по врачам — из "Уникальных пациентов за период"
+    # (выгружать за нужный месяц), Итого по клинике — из сводного
+    df["Кол-во пациентов"] = df["key"].map(unic_by_doc).fillna(0).astype(int)
     df["Кол-во первичных"] = df["key"].map(perv_by_doc).fillna(0).astype(int)
     df = add_calc_columns(df.drop(columns=["key"]))
     tot = {c: df[c].sum() for c in MAIN_COLUMNS[2:]}
