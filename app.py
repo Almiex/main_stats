@@ -9,6 +9,7 @@ import streamlit as st
 import yaml
 from openpyxl import Workbook
 from openpyxl.utils import get_column_letter
+from openpyxl.styles import Font, Alignment
 
 CFG = yaml.safe_load("""
 columns:
@@ -23,6 +24,8 @@ columns:
   to_pay:       ["выставление в оплату"]
   service:      ["название услуги", "услуга"]
   first_visit:  ["первая услуга", "первое обращение", "первичн"]
+  pot_hours:    ["рабочих часов всего"]
+  pot_revenue:  ["потенциал"]
 service_keep: ["допплер", "узи", "прием", "приём", "эхокг", "эхо кг", "эхо-кг"]
 to_pay_keep_value: "есть"
 overload_threshold: 80
@@ -76,7 +79,6 @@ def find_col(cols, key, required=True):
         raise ValueError(f"Колонка '{key}' не найдена. Есть: {list(cols)}")
     return None
 
-# ================== ПАРСЕРЫ ОТЧЕТОВ ==================
 
 def read_any(uploaded):
     name = uploaded.name.lower()
@@ -84,6 +86,18 @@ def read_any(uploaded):
     return pd.read_excel(BytesIO(uploaded.read()), sheet_name=0,
                          header=None, engine=engine)
 
+
+def detect_month_label(df_raw, default=""):
+    """Ищет 'ПО: 27.09.2026' / 'По: ...' в шапке -> '09.2026'."""
+    for i in range(min(8, len(df_raw))):
+        for v in df_raw.iloc[i].tolist():
+            m = re.search(r"по:\s*(\d{2})\.(\d{2})\.(\d{4})",
+                          norm_text(v))
+            if m:
+                return f"{m.group(2)}.{m.group(3)}"
+    return default
+
+# ================== ПАРСЕРЫ ОТЧЕТОВ ==================
 
 def parse_zagruzka(df_raw):
     hr = find_header_row(df_raw, must_have=("доктор", "специализация"))
@@ -176,7 +190,26 @@ def parse_svodnyj_patients(df_raw, doctor_keys):
     t = t.drop_duplicates(subset=[c_doc, c_id])
     return t[c_doc].map(doctor_key).value_counts(), int(t[c_id].nunique())
 
-# ================== ТАБЛИЦА 1 ==================
+
+def parse_potential(df_raw):
+    """Таблица потенциала. Возвращает (часы_итого, потенциал_итого,
+    сырой df для копирования листа)."""
+    hr = find_header_row(df_raw, must_have=("потенциал", "рабочих часов"))
+    t = build_table(df_raw, hr)
+    c_h = find_col(t.columns, "pot_hours")
+    c_r = find_col(t.columns, "pot_revenue")
+    total = t[t.apply(lambda r: any(_is_total(v) for v in r.tolist()),
+                      axis=1)]
+    if total.empty:
+        raise ValueError("В таблице потенциала не найдена строка 'Итого'.")
+    row = total.iloc[0]
+    hours = float(pd.to_numeric(pd.Series([row[c_h]]),
+                                errors="coerce").fillna(0).iloc[0])
+    revenue = float(pd.to_numeric(pd.Series([row[c_r]]),
+                                  errors="coerce").fillna(0).iloc[0])
+    return hours, revenue, df_raw
+
+# ================== ОСНОВНОЙ ОТЧЕТ (2 листа) ==================
 
 MAIN_COLUMNS = ["ФИО врача", "Специализация", "Рабочих часов по графику",
                 "Время с пациентом", "Стоимость оказанных услуг(руб)",
@@ -240,7 +273,74 @@ def totals_for_dinamika(main_df):
             "main_total_visits": row["Кол-во посещений"],
             "main_total_first": row["Кол-во первичных"]}
 
-# ================== ТАБЛИЦА 2: ДИНАМИКА ==================
+
+def write_main_report(month_label, main_df, potential_raw, pot_hours,
+                      pot_revenue):
+    """Excel с листом 'Потенциал' (копия загруженной таблицы) и листом
+    'Отчет по докторам' (таблица + блок итогов под ней)."""
+    wb = Workbook()
+    # --- лист 1: Потенциал ---
+    ws0 = wb.active
+    ws0.title = "Потенциал"
+    if potential_raw is not None:
+        for i, row in potential_raw.iterrows():
+            for j, v in enumerate(row.tolist()):
+                if pd.notna(v):
+                    ws0.cell(i + 1, j + 1, v)
+    # --- лист 2: Отчет по докторам ---
+    ws = wb.create_sheet("Отчет по докторам")
+    ws.cell(1, 1, f"Отчет по докторам, {month_label}").font = Font(bold=True)
+    ws.cell(2, 1, f"Отчет по докторам, {month_label}").font = Font(bold=True)
+    bold = Font(bold=True)
+    for j, col in enumerate(ALL_COLUMNS, start=1):
+        c = ws.cell(3, j, col)
+        c.font = bold
+        c.alignment = Alignment(wrap_text=True, vertical="center")
+    for i, row in main_df.iterrows():
+        for j, col in enumerate(ALL_COLUMNS, start=1):
+            v = row[col]
+            if pd.isna(v):
+                continue
+            if isinstance(v, str):
+                ws.cell(4 + i, j, v)
+            else:
+                ws.cell(4 + i, j, round(float(v), 4))
+    for j in range(1, len(ALL_COLUMNS) + 1):
+        ws.cell(4 + len(main_df) - 1, j).font = bold  # Итого
+    # --- блок под таблицей ---
+    tot = main_df.iloc[-1]
+    n_doctors = len(main_df) - 1
+    r0 = 4 + len(main_df) + 1
+    ws.cell(r0, 4, round(float(tot["Рабочих часов по графику"]) / 1.488, 3))
+    ws.cell(r0, 6, round(float(pd.to_numeric(
+        main_df["Стоимость фактического часа"], errors="coerce")
+        .iloc[:-1].mean()), 3))
+    block = [("Исп мощности",
+              round(float(tot["Рабочих часов по графику"]) / pot_hours * 100, 2)
+              if pot_hours else None),
+             ("Дост потенциала",
+              round(float(tot["Стоимость оказанных услуг(руб)"]) / pot_revenue * 100, 2)
+              if pot_revenue else None),
+             ("Альтернативный потенциал", None),
+             ("Разница с классическим", None),
+             ("Вывод", None)]
+    for k, (label, val) in enumerate(block):
+        ws.cell(r0 + 1 + k, 5, label).font = bold
+        if val is not None:
+            ws.cell(r0 + 1 + k, 7, val)
+    for j, col in enumerate(ALL_COLUMNS, start=1):
+        ws.column_dimensions[get_column_letter(j)].width = max(12, len(col) // 2 + 4)
+    buf = BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return buf.getvalue()
+
+# ================== ОБНОВЛЕНИЕ ФАЙЛА «ДИНАМИКА» ==================
+
+RU_MONTHS = {1: "Январь", 2: "Февраль", 3: "Март", 4: "Апрель", 5: "Май",
+             6: "Июнь", 7: "Июль", 8: "Август", 9: "Сентябрь",
+             10: "Октябрь", 11: "Ноябрь", 12: "Декабрь"}
+
 
 def _fmt_month(v):
     if isinstance(v, pd.Timestamp):
@@ -254,6 +354,23 @@ def _fmt_month(v):
             m = int(v)
             return f"{m:02d}.{int(round((v - m) * 10000))}"
     return str(v)
+
+
+def _ru_month(label):
+    if isinstance(label, (pd.Timestamp, datetime, date)):
+        return RU_MONTHS[int(label.strftime("%m"))]
+    m = re.match(r"(\d{2})\.(\d{4})", str(label))
+    if m:
+        return RU_MONTHS[int(m.group(1))]
+    return str(label)
+
+
+def _short_key(name):
+    """'Гук Наталья Владимировна' / 'Гук Н.В.' -> 'гук нв'"""
+    toks = norm_text(name).replace(".", " ").split()
+    if not toks:
+        return ""
+    return toks[0] + " " + "".join(t[0] for t in toks[1:])
 
 
 DERIVED = {
@@ -277,9 +394,8 @@ MANUAL = {"мощность в часах": "potential_hours_total",
           "первичных": "main_total_first"}
 
 
-def build_dinamika(reference_bytes, new_col_title, metrics,
-                   to_pay_label="Изм мес. к мес. в %"):
-    ref = pd.read_excel(BytesIO(reference_bytes), sheet_name=0, header=None)
+def _sheet1_extend(ws, ref, month_label, metrics):
+    """Лист ДИНАМИКА: новый столбец после последнего месяца."""
     hdr = next(i for i in range(10) if ref.iloc[i].notna().sum() >= 3)
     header = ref.iloc[hdr].tolist()
     param_col = next(i for i, v in enumerate(header)
@@ -290,16 +406,19 @@ def build_dinamika(reference_bytes, new_col_title, metrics,
     body = ref.iloc[hdr + 1:].dropna(how="all")
     labels = body[param_col].tolist()
 
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "Динамика"
-    ws.cell(1, 1, "№")
-    ws.cell(1, 2, "Параметр")
-    for j, c in enumerate(month_cols):
-        ws.cell(1, 3 + j, _fmt_month(header[c]))
-    new_col = 3 + len(month_cols)
-    ws.cell(1, new_col, new_col_title)
-    ws.cell(1, new_col + 1, to_pay_label)
+    # вставляем новый столбец в ws (после последнего месяца, перед Изм)
+    insert_at = 3 + len(month_cols)  # 1-based: новый столбец на месте Изм
+    ws.insert_cols(insert_at)
+    new_col = insert_at
+    prev_col = new_col - 1
+    izm_new = new_col + 1
+
+    # заголовки
+    ws.cell(1, new_col, month_label).font = Font(bold=True)
+    prev_label = ws.cell(1, prev_col).value
+    ws.cell(1, izm_new,
+            f"Изм {_ru_month(month_label)} к {_ru_month(prev_label)} в %"
+            ).font = Font(bold=True)
 
     pos = {norm_text(l).replace("потеницал", "потенциал"): r_off + 2
            for r_off, l in enumerate(labels)}
@@ -313,16 +432,11 @@ def build_dinamika(reference_bytes, new_col_title, metrics,
 
     for r_off, label in enumerate(labels):
         r = r_off + 2
-        ws.cell(r, 1, r_off + 1)
-        ws.cell(r, 2, label)
-        for j, c in enumerate(month_cols):
-            v = body.iloc[r_off, c]
-            if pd.notna(v):
-                ws.cell(r, 3 + j, v)
         k = norm_text(label).replace("потеницал", "потенциал")
         L = get_column_letter(new_col)
         if k in MANUAL and MANUAL[k] in metrics:
-            ws.cell(r, new_col, metrics[MANUAL[k]])
+            c = ws.cell(r, new_col, metrics[MANUAL[k]])
+            c.number_format = "#,##0.00"
         elif k in DERIVED:
             ws.cell(r, new_col, DERIVED[k].format(
                 c=L, r_power=find_row("мощность в часах"),
@@ -331,40 +445,215 @@ def build_dinamika(reference_bytes, new_col_title, metrics,
                 r_hours=find_row("рабочие часы врачей"),
                 r_hp=find_row("часы с пациентом"),
                 r_fl=find_row("фл"), r_vis=find_row("посещений")))
-        Lp = get_column_letter(new_col - 1)
-        ws.cell(r, new_col + 1,
+        Lp = get_column_letter(prev_col)
+        ws.cell(r, izm_new,
                 f'=IFERROR({L}{r}/{Lp}{r}-1,"")').number_format = "0.0%"
+    ws.column_dimensions[get_column_letter(izm_new)].width = 18
 
+
+# метрики листа «Динамика по врачам» (порядок групп столбцов)
+S2_METRICS = ["Рабочих часов по графику", "Стоимость оказанных услуг(руб)",
+              "Загрузка", "Стоимость фактического часа",
+              "Посещений 1-м физическим лицом", "% первичных к пациентам"]
+
+
+def _month_like(v):
+    if isinstance(v, (pd.Timestamp, datetime, date)):
+        return True
+    v = str(v)
+    return v in RU_MONTHS.values() or re.match(r"^\d{2}\.\d{4}$", v)
+
+
+def _sheet2_extend(ws, ref, month_label, main_df):
+    """Лист 'Динамика по врачам': добавляем столбец нового месяца в каждую
+    группу метрик и пересчитываем Итог."""
+    df = main_df[main_df["ФИО врача"] != "Итого по клинике"].copy()
+    by_doc = {_short_key(n): r for n, r in
+              zip(df["ФИО врача"], df.to_dict("records"))}
+    by_spec = {norm_text(k): g for k, g in df.groupby("Специализация")}
+
+    # --- детекция структуры ---
+    hdr_r = first_mc = None
+    best = -1
+    for r in range(1, 12):
+        cells = [ws.cell(r, c).value for c in range(1, 12)]
+        score = sum(1 for v in cells if _month_like(v))
+        if score > best:
+            best, hdr_r = score, r
+    if hdr_r is None or best < 6:
+        return
+    for c in range(1, 12):
+        if _month_like(ws.cell(hdr_r, c).value):
+            first_mc = c
+            break
+    n_total = 0
+    c = first_mc
+    while c <= ws.max_column and ws.cell(hdr_r, c).value not in (None, ""):
+        n_total += 1
+        c += 1
+    n_groups = 6
+    if n_total % n_groups:
+        return
+    gm = n_total // n_groups  # месяцев в группе
+    label_col = first_mc - 1
+    ru_label = _ru_month(month_label)
+
+    def block_values(label):
+        k = norm_text(label)
+        if k in by_spec:
+            g = by_spec[k]
+            return [float(pd.to_numeric(g[mm], errors="coerce").mean())
+                    for mm in S2_METRICS]
+        rec = by_doc.get(_short_key(label))
+        if rec:
+            return [float(rec[mm]) if pd.notna(rec[mm]) else None
+                    for mm in S2_METRICS]
+        return [None] * 6
+
+    # --- вставка столбца в каждую группу (справа налево) ---
+    for g in range(n_groups - 1, -1, -1):
+        pos = first_mc + (g + 1) * gm
+        if g == n_groups - 1:
+            pos = first_mc + g * gm + gm  # после последнего месяца группы
+        ws.insert_cols(pos)
+    # новые позиции: группа g, новый месяц = first_mc + g*(gm+1) + gm
+    for g in range(n_groups):
+        col = first_mc + g * (gm + 1) + gm
+        ws.cell(hdr_r, col, ru_label).font = Font(bold=True)
+
+    # --- заполнение значений ---
+    for r in range(hdr_r + 1, ws.max_row + 1):
+        label = ws.cell(r, label_col).value
+        if label in (None, ""):
+            continue
+        vals = block_values(label)
+        for g in range(n_groups):
+            v = vals[g]
+            if v is not None:
+                col = first_mc + g * (gm + 1) + gm
+                ws.cell(r, col, round(v, 4))
+
+    # --- пересчет Итог (последние 6 столбцов) ---
+    itog_start = ws.max_column - 5
+    group_ranges = []
+    cur_group, cur_docs = None, []
+    for r in range(hdr_r + 1, ws.max_row + 1):
+        label = ws.cell(r, label_col).value
+        if label in (None, ""):
+            continue
+        if norm_text(label) in by_spec:
+            if cur_group:
+                group_ranges.append((cur_group, cur_docs))
+            cur_group, cur_docs = r, []
+        elif cur_group is not None:
+            cur_docs.append(r)
+    if cur_group:
+        group_ranges.append((cur_group, cur_docs))
+
+    for group_r, doc_rows in group_ranges:
+        for row in [group_r] + doc_rows:
+            for g in range(n_groups):
+                base = first_mc + g * (gm + 1)
+                cells = [ws.cell(row, base + m).value
+                         for m in range(gm + 1)]
+                nums = [v for v in cells if isinstance(v, (int, float))]
+                if not nums:
+                    continue
+                if row == group_r:
+                    # взвешенное по числу врачей с данными за месяц
+                    num = den = 0.0
+                    for m, v in enumerate(cells):
+                        if isinstance(v, (int, float)):
+                            cnt = sum(
+                                1 for dr in doc_rows
+                                if isinstance(
+                                    ws.cell(dr, base + m).value,
+                                    (int, float)))
+                            cnt = max(cnt, 1)
+                            num += v * cnt
+                            den += cnt
+                    if den:
+                        ws.cell(row, itog_start + g,
+                                round(num / den, 4))
+                else:
+                    ws.cell(row, itog_start + g,
+                            round(sum(nums) / len(nums), 4))
+
+
+BASE_COLUMNS = ["Месяц", "ФИО врача", "Специализация",
+                "Рабочих часов по графику", "Время с пациентом",
+                "Стоимость оказанных услуг(руб)", "Кол-во посещений",
+                "Кол-во пациентов", "Кол-во первичных", "Загрузка",
+                "Стоимость фактического часа", "Стоимость посещения",
+                "Выручка на физическое лицо",
+                "Посещений 1-м физическим лицом",
+                "% первичных к пациентам", "Состояние врача"]
+
+
+def _to_initials(name):
+    toks = str(name).replace(".", " ").split()
+    if len(toks) < 2:
+        return str(name)
+    return f"{toks[0]} {''.join(t[0] + '.' for t in toks[1:])}"
+
+
+def _base_extend(ws, ref, month_label, main_df):
+    """Лист 'База': дописываем строки нового месяца."""
+    df = main_df[main_df["ФИО врача"] != "Итого по клинике"].copy()
+    ru = _ru_month(month_label)
+    start = ws.max_row + 1
+    for i, (_, row) in enumerate(df.iterrows()):
+        r = start + i
+        ws.cell(r, 1, ru)
+        ws.cell(r, 2, _to_initials(row["ФИО врача"]))
+        for j, col in enumerate(BASE_COLUMNS[2:], start=3):
+            v = row[col]
+            if pd.isna(v):
+                continue
+            c = ws.cell(r, j, round(float(v), 4)
+                        if isinstance(v, (int, float)) else v)
+            if isinstance(v, (int, float)):
+                c.number_format = "#,##0.00"
+
+
+def update_dinamika_file(reference_bytes, month_label, metrics, main_df):
+    """Загруженный файл «Динамика» -> тот же файл + новый месяц на всех
+    листах. Возвращает bytes обновленного xlsx."""
+    sheets = pd.read_excel(BytesIO(reference_bytes), sheet_name=None,
+                           header=None)
+    wb = Workbook()
+    wb.remove(wb.active)
+    for name, ref in sheets.items():
+        n = norm_text(name)
+        ws = wb.create_sheet(title=str(name)[:31])
+        for i, row in ref.iterrows():
+            for j, v in enumerate(row.tolist()):
+                if pd.notna(v):
+                    ws.cell(i + 1, j + 1, v)
+        if "динамика" in n and "врачам" not in n:
+            _sheet1_extend(ws, ref, month_label, metrics)
+        elif "врачам" in n:
+            _sheet2_extend(ws, ref, month_label, main_df)
+        elif "база" in n:
+            _base_extend(ws, ref, month_label, main_df)
     buf = BytesIO()
     wb.save(buf)
     buf.seek(0)
     return buf.getvalue()
 
+
 # ================== ИНТЕРФЕЙС ==================
 
-def to_excel_bytes(df, sheet_name="Отчет"):
-    buf = BytesIO()
-    with pd.ExcelWriter(buf, engine="openpyxl") as w:
-        df.to_excel(w, index=False, sheet_name=sheet_name)
-    buf.seek(0)
-    return buf.getvalue()
-
-
-st.set_page_config(page_title="КВС: сборка отчетов", layout="wide")
-st.title("КВС: сборка месячных отчетов")
-st.caption("Загрузите 5 отчетов (названия файлов не важны — важна структура) "
-           "+ опционально референс листа «Динамика».")
+st.set_page_config(page_title="Сборка месячных отчетов по врачам",
+                   layout="wide")
+st.title("Сборка месячных отчетов по врачам")
+st.caption("Загрузите таблицу потенциала и 5 отчетов (названия файлов не "
+           "важны — важна структура) + опционально референс листа «Динамика».")
 
 with st.sidebar:
-    st.header("Параметры месяца")
-    month_name = st.text_input("Название нового столбца (месяц)",
-                               value="Сентябрь 2026")
-    potential_hours = st.number_input("Мощность в часах (Итого по потенциалу)",
-                                      min_value=0.0, value=0.0)
-    potential_revenue = st.number_input("Потенциал по выручке (Итого)",
-                                        min_value=0.0, value=0.0)
-    st.divider()
     st.header("Файлы")
+    f_pot = st.file_uploader("Таблица потенциала (лист «Потенциал»)",
+                             type=["xls", "xlsx"])
     f_zag = st.file_uploader("1. Загрузка врачей (без кабинетов)",
                              type=["xls", "xlsx"])
     f_sum = st.file_uploader("2. Общая сумма", type=["xls", "xlsx"])
@@ -379,12 +668,19 @@ with st.sidebar:
 
 files = [f_zag, f_sum, f_unic, f_perv, f_svod]
 if not all(files):
-    st.info("Загрузите все 5 отчетов — имена файлов могут быть любыми.")
+    st.info("Загрузите таблицу потенциала (для двух листов и «Динамики») "
+            "и все 5 отчетов.")
     st.stop()
 
 try:
     with st.spinner("Разбираю отчеты..."):
-        zag = parse_zagruzka(read_any(f_zag))
+        pot_hours, pot_revenue, pot_raw = (None, None, None)
+        if f_pot is not None:
+            pot_raw = read_any(f_pot)
+            pot_hours, pot_revenue, _ = parse_potential(pot_raw)
+        zag_raw = read_any(f_zag)
+        month_label = detect_month_label(zag_raw, default="")
+        zag = parse_zagruzka(zag_raw)
         doctor_keys = set(zag["key"])
         sum_by_doc, spec_by_doc = parse_obschaya_summa(read_any(f_sum))
         unic_by_doc = parse_unic_patients(read_any(f_unic))
@@ -394,46 +690,38 @@ try:
         main_df = build_main_table(zag, sum_by_doc, spec_by_doc, unic_by_doc,
                                    perv_by_doc, svod_by_doc, svod_clinic_total)
 
-    st.subheader("Таблица 1 — Отчет по докторам")
+    month_name = st.text_input("Название столбца нового месяца",
+                               value=month_label or "09.2026")
+
+    st.subheader("Отчет по докторам")
     st.dataframe(main_df, use_container_width=True, hide_index=True)
-    st.download_button("Скачать таблицу 1 (xlsx)",
-                       to_excel_bytes(main_df, "Отчет по докторам"),
-                       "KVS_main.xlsx")
+    main_bytes = write_main_report(month_name, main_df, pot_raw,
+                                   pot_hours or 0, pot_revenue or 0)
+    st.download_button("Скачать отчет (xlsx, 2 листа)", main_bytes,
+                       "Отчет_по_докторам.xlsx")
 
     metrics = totals_for_dinamika(main_df)
-    metrics["potential_hours_total"] = potential_hours
-    metrics["potential_revenue_total"] = potential_revenue
+    metrics["potential_hours_total"] = pot_hours
+    metrics["potential_revenue_total"] = pot_revenue
 
-    st.subheader("Таблица 2 — лист «Динамика»")
+    st.subheader("Файл «Динамика»")
     if f_dyn:
-        dyn_bytes = build_dinamika(BytesIO(f_dyn.read()).getvalue(),
-                                   month_name, metrics)
-        st.download_button("Скачать таблицу 2 «Динамика» (xlsx)", dyn_bytes,
-                           "KVS_dinamika.xlsx")
+        dyn_bytes = update_dinamika_file(BytesIO(f_dyn.read()).getvalue(),
+                                         month_name, metrics, main_df)
+        st.download_button("Скачать обновленную «Динамику» (xlsx)",
+                           dyn_bytes, "Динамика.xlsx")
     else:
-        st.warning("Референс «Динамики» не загружен.")
-        simple = {k: metrics[v] for k, v in {
-            "Мощность в часах": "potential_hours_total",
-            "Потенциал по выручке": "potential_revenue_total",
-            "Стоимость помощи": "main_total_sum",
-            "Рабочие часы врачей": "main_total_hours_plan",
-            "Часы с пациентом": "main_total_hours_patient",
-            "ФЛ": "main_total_patients",
-            "Посещений": "main_total_visits",
-            "Первичных": "main_total_first",
-        }.items() if v in metrics}
-        dyn_df = pd.DataFrame({"Показатель": list(simple.keys()),
-                               month_name: list(simple.values())})
-        st.dataframe(dyn_df, hide_index=True)
-        st.download_button("Скачать таблицу 2 (xlsx)",
-                           to_excel_bytes(dyn_df, "Динамика"),
-                           "KVS_dinamika.xlsx")
+        st.info("Загрузите файл «Динамики» прошлого месяца — получите его "
+                "же с добавленным новым месяцем.")
 
     with st.expander("Диагностика: как сматчились врачи"):
         c1, c2 = st.columns(2)
-        c1.metric("Врачей в основном отчете", len(doctor_keys))
+        c1.metric("Врачей в отчете", len(doctor_keys))
         c2.metric("Уникальных пациентов по клинике (из сводного)",
                   svod_clinic_total)
+        if pot_hours:
+            st.write(f"Потенциал: {pot_hours:.1f} ч, "
+                     f"{pot_revenue:,.0f} руб.")
         missed = doctor_keys - set(svod_by_doc.index)
         if missed:
             st.write("Нет в сводном отчете:", sorted(missed))
