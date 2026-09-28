@@ -13,7 +13,7 @@ from openpyxl.styles import Font, Alignment
 
 CFG = yaml.safe_load("""
 columns:
-  doctor:       ["доктор", "врач", "фио врача"]
+  doctor:       ["врач", "фио врача", "доктор"]
   spec:         ["специализация доктора", "специализация", "специальность"]
   hours_plan:   ["часов по табелю", "рабочих часов по графику"]
   hours_patient: ["часов по записи", "часов по дошедшим", "время с пациентом"]
@@ -105,22 +105,6 @@ def detect_month_label(df_raw, default=""):
 # ================== ПАРСЕРЫ ОТЧЕТОВ ==================
 
 DATE_RE = re.compile(r"^(\d{2})\.(\d{2})\.(\d{4})")
-
-
-def zagruzka_months(df_raw):
-    """Доступные месяцы (MM.YYYY) из строк по дням отчета загрузки."""
-    try:
-        hr = find_header_row(df_raw, must_have=("доктор", "специализация"))
-    except ValueError:
-        return []
-    t = build_table(df_raw, hr)
-    c_doc = find_col(t.columns, "doctor")
-    months = set()
-    for v in t[c_doc].tolist():
-        m = DATE_RE.match(str(v).strip())
-        if m:
-            months.add(f"{m.group(2)}.{m.group(3)}")
-    return sorted(months)
 
 
 def parse_zagruzka(df_raw, month=None):
@@ -806,33 +790,14 @@ if not all(files):
 try:
     with st.spinner("Разбираю отчеты..."):
         zag_raw = read_any(f_zag)
-        available_months = zagruzka_months(zag_raw)
-        sum_raw = read_any(f_sum)
-        unic_raw = read_any(f_unic)
-        perv_raw = read_any(f_perv)
-        svod_raw = read_any(f_svod)
-
-    if len(available_months) > 1:
-        sel_month = st.sidebar.selectbox(
-            "Месяц сборки",
-            available_months,
-            index=len(available_months) - 1)
-        st.sidebar.caption("Отчеты «Общая сумма» и «Уникальных пациентов» "
-                           "не содержат дат. «Уникальных пациентов» "
-                           "выгружайте за выбранный месяц — иначе цифры "
-                           "будут за весь период выгрузки.")
-    else:
-        sel_month = available_months[-1] if available_months else None
-
-    with st.spinner("Собираю отчет..."):
-        month_label = sel_month or detect_month_label(zag_raw, default="")
-        zag, norm_rate = parse_zagruzka(zag_raw, month=sel_month)
+        month_label = detect_month_label(zag_raw, default="")
+        zag, norm_rate = parse_zagruzka(zag_raw)
         doctor_keys = set(zag["key"])
-        sum_by_doc, spec_by_doc = parse_obschaya_summa(sum_raw)
-        unic_by_doc = parse_unic_patients(unic_raw)
-        perv_by_doc = parse_pervoe_obr(perv_raw, month=sel_month)
+        sum_by_doc, spec_by_doc = parse_obschaya_summa(read_any(f_sum))
+        unic_by_doc = parse_unic_patients(read_any(f_unic))
+        perv_by_doc = parse_pervoe_obr(read_any(f_perv))
         svod_by_doc, svod_clinic_total = parse_svodnyj_patients(
-            svod_raw, doctor_keys, month=sel_month)
+            read_any(f_svod), doctor_keys)
         main_df = build_main_table(zag, sum_by_doc, spec_by_doc, unic_by_doc,
                                    perv_by_doc, svod_by_doc, svod_clinic_total)
         potential_df = build_potential(main_df, norm_rate)
