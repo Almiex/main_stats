@@ -24,6 +24,7 @@ columns:
   to_pay:       ["выставление в оплату"]
   service:      ["название услуги", "услуга"]
   first_visit:  ["первая услуга", "первое обращение", "первичн"]
+  date:         ["дата услуги", "дата первой услуги", "дата"]
   pot_hours:    ["рабочих часов всего"]
   pot_revenue:  ["потенциал"]
 service_keep: ["допплер", "узи", "прием", "приём", "эхокг", "эхо кг", "эхо-кг"]
@@ -100,18 +101,74 @@ def detect_month_label(df_raw, default=""):
 
 # ================== ПАРСЕРЫ ОТЧЕТОВ ==================
 
-def parse_zagruzka(df_raw):
+DATE_RE = re.compile(r"^(\d{2})\.(\d{2})\.(\d{4})")
+
+
+def zagruzka_months(df_raw):
+    """Доступные месяцы (MM.YYYY) из строк по дням отчета загрузки."""
+    try:
+        hr = find_header_row(df_raw, must_have=("доктор", "специализация"))
+    except ValueError:
+        return []
+    t = build_table(df_raw, hr)
+    c_doc = find_col(t.columns, "doctor")
+    months = set()
+    for v in t[c_doc].tolist():
+        m = DATE_RE.match(str(v).strip())
+        if m:
+            months.add(f"{m.group(2)}.{m.group(3)}")
+    return sorted(months)
+
+
+def parse_zagruzka(df_raw, month=None):
+    """month=None -> сводные строки врачей за весь период.
+    month='MM.YYYY' -> суммы по дням выбранного месяца."""
     hr = find_header_row(df_raw, must_have=("доктор", "специализация"))
     t = build_table(df_raw, hr)
     c_doc = find_col(t.columns, "doctor")
     c_spec = find_col(t.columns, "spec")
+
+    def num_series(key):
+        col = find_col(t.columns, key, required=False)
+        if col is None:
+            return pd.Series(0.0, index=t.index)
+        return pd.to_numeric(t[col], errors="coerce").fillna(0)
+
+    norm_rate = float(CFG.get("stavka_norm", 148.8))
+
+    if month is not None:
+        hs = num_series("hours_plan")
+        hp = num_series("hours_patient")
+        vs = num_series("visits")
+        acc = {}   # key -> [fio, hours, hours_patient, visits]
+        cur_key, cur_fio = None, ""
+        for idx, r in t.iterrows():
+            doc = str(r[c_doc]).strip()
+            m = DATE_RE.match(doc)
+            if m:
+                if cur_key and f"{m.group(2)}.{m.group(3)}" == month:
+                    a = acc.setdefault(
+                        cur_key, [cur_fio, 0.0, 0.0, 0.0])
+                    a[1] += float(hs[idx])
+                    a[2] += float(hp[idx])
+                    a[3] += float(vs[idx])
+            else:
+                spec = str(r[c_spec]).strip()
+                if spec.lower() in ("", "nan", "none") and not _is_total(doc) \
+                        and doc.lower() not in ("nan", "none"):
+                    cur_key, cur_fio = doctor_key(doc), doc
+        rows = [{"key": k, "ФИО врача": v[0], "Специализация": "",
+                 "Рабочих часов по графику": v[1],
+                 "Время с пациентом": v[2],
+                 "Кол-во посещений": v[3]} for k, v in acc.items()]
+        return pd.DataFrame(rows), norm_rate
 
     def is_doctor_row(r):
         doc = str(r[c_doc]).strip()
         spec = str(r[c_spec]).strip()
         if spec.lower() not in ("", "nan", "none"):
             return False
-        if re.match(r"^\d{2}\.\d{2}\.\d{4}", doc):
+        if DATE_RE.match(doc):
             return False
         return not _is_total(doc)
 
@@ -122,8 +179,6 @@ def parse_zagruzka(df_raw):
         if col is None:
             return 0.0
         return pd.to_numeric(t[col], errors="coerce").fillna(0)
-
-    norm_rate = float(CFG.get("stavka_norm", 148.8))
 
     df = pd.DataFrame({
         "key": t[c_doc].map(doctor_key),
@@ -168,16 +223,21 @@ def parse_unic_patients(df_raw):
     return pd.DataFrame({"key": key, "v": val}).groupby("key")["v"].sum()
 
 
-def parse_pervoe_obr(df_raw):
+def parse_pervoe_obr(df_raw, month=None):
     hr = find_header_row(df_raw, must_have=("доктор", "номер карты"))
     t = build_table(df_raw, hr)
     c_doc = find_col(t.columns, "doctor")
     t = t[t[c_doc].notna()]
     t = t[~t[c_doc].apply(_is_total)]
+    if month is not None:
+        c_date = find_col(t.columns, "date", required=False)
+        if c_date is not None:
+            d = pd.to_datetime(t[c_date], errors="coerce", format="mixed")
+            t = t[d.dt.strftime("%m.%Y") == month]
     return t[c_doc].map(doctor_key).value_counts()
 
 
-def parse_svodnyj_patients(df_raw, doctor_keys):
+def parse_svodnyj_patients(df_raw, doctor_keys, month=None):
     hr = find_header_row(df_raw, must_have=("врач", "пациент"))
     t = build_table(df_raw, hr)
     c_doc = find_col(t.columns, "doctor")
@@ -186,6 +246,11 @@ def parse_svodnyj_patients(df_raw, doctor_keys):
     c_srv = find_col(t.columns, "service", required=False)
     c_id = find_col(t.columns, "card", required=False) or c_pat
     t = t[t[c_doc].notna() & t[c_pat].notna()]
+    if month is not None:
+        c_date = find_col(t.columns, "date", required=False)
+        if c_date is not None:
+            d = pd.to_datetime(t[c_date], errors="coerce", format="mixed")
+            t = t[d.dt.strftime("%m.%Y") == month]
     t = t[t[c_doc].map(doctor_key).isin(doctor_keys)]
     t = t[t[c_pay].map(norm_text) == norm_text(CFG["to_pay_keep_value"])]
     if c_srv is not None:
@@ -737,14 +802,31 @@ if not all(files):
 try:
     with st.spinner("Разбираю отчеты..."):
         zag_raw = read_any(f_zag)
-        month_label = detect_month_label(zag_raw, default="")
-        zag, norm_rate = parse_zagruzka(zag_raw)
+        available_months = zagruzka_months(zag_raw)
+        sum_raw = read_any(f_sum)
+        unic_raw = read_any(f_unic)
+        perv_raw = read_any(f_perv)
+        svod_raw = read_any(f_svod)
+
+    if len(available_months) > 1:
+        sel_month = st.sidebar.selectbox(
+            "Месяц сборки",
+            available_months,
+            index=len(available_months) - 1)
+        st.sidebar.caption("Отчеты «Общая сумма» и «Уникальных пациентов» "
+                           "не содержат дат — учитываются за весь период.")
+    else:
+        sel_month = available_months[-1] if available_months else None
+
+    with st.spinner("Собираю отчет..."):
+        month_label = sel_month or detect_month_label(zag_raw, default="")
+        zag, norm_rate = parse_zagruzka(zag_raw, month=sel_month)
         doctor_keys = set(zag["key"])
-        sum_by_doc, spec_by_doc = parse_obschaya_summa(read_any(f_sum))
-        unic_by_doc = parse_unic_patients(read_any(f_unic))
-        perv_by_doc = parse_pervoe_obr(read_any(f_perv))
+        sum_by_doc, spec_by_doc = parse_obschaya_summa(sum_raw)
+        unic_by_doc = parse_unic_patients(unic_raw)
+        perv_by_doc = parse_pervoe_obr(perv_raw, month=sel_month)
         svod_by_doc, svod_clinic_total = parse_svodnyj_patients(
-            read_any(f_svod), doctor_keys)
+            svod_raw, doctor_keys, month=sel_month)
         main_df = build_main_table(zag, sum_by_doc, spec_by_doc, unic_by_doc,
                                    perv_by_doc, svod_by_doc, svod_clinic_total)
         potential_df = build_potential(main_df, norm_rate)
