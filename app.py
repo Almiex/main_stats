@@ -354,71 +354,44 @@ POT_COLUMNS = ["Специализация", "Норма ставки", "Кол�
                "Целевая загрузка", "Потенциал"]
 
 
-def build_potential(main_df, norm_rate, target_load=0.8):
-    """Таблица потенциала по референсу, построенная из данных отчетов."""
-    df = main_df[main_df["ФИО врача"] != "Итого по клинике"].copy()
-    rows = []
-    for spec, g in df.groupby("Специализация", sort=False):
-        spec = str(spec).strip()
-        if not spec or spec.lower() in ("nan", "none"):
-            continue
-        hours = float(pd.to_numeric(g["Рабочих часов по графику"],
-                                    errors="coerce").fillna(0).sum())
-        rate = float(pd.to_numeric(g["Стоимость фактического часа"],
-                                   errors="coerce").mean())
-        rows.append({
-            "Специализация": spec,
-            "Норма ставки": norm_rate,
-            "Количество ставок": round(hours / norm_rate, 2) if norm_rate else 0,
-            "Рабочих часов всего": round(hours, 2),
-            "Стоимость часа": round(rate, 2) if rate == rate else 0,
-            "Целевая загрузка": target_load,
-            "Потенциал": round(hours * rate * target_load, 2)
-            if rate == rate else 0,
-        })
-    t = pd.DataFrame(rows, columns=POT_COLUMNS)
-    total = {c: "" for c in POT_COLUMNS}
-    total["Специализация"] = "Итого"
-    total["Количество ставок"] = round(
-        pd.to_numeric(t["Количество ставок"], errors="coerce").sum(), 2)
-    total["Рабочих часов всего"] = round(
-        pd.to_numeric(t["Рабочих часов всего"], errors="coerce").sum(), 2)
-    total["Потенциал"] = round(
-        pd.to_numeric(t["Потенциал"], errors="coerce").sum(), 2)
-    return pd.concat([t, pd.DataFrame([total])], ignore_index=True)
+def parse_potential(df_raw):
+    """Таблица потенциала (эталон, загружается файлом).
+    Возвращает (часы_итого, потенциал_итого, сырой df для копии листа)."""
+    hr = find_header_row(df_raw, must_have=("потенциал", "рабочих часов"))
+    t = build_table(df_raw, hr)
+    c_h = find_col(t.columns, "pot_hours")
+    c_r = find_col(t.columns, "pot_revenue")
+    total = t[t.apply(lambda r: any(_is_total(v) for v in r.tolist()),
+                      axis=1)]
+    if total.empty:
+        raise ValueError("В таблице потенциала не найдена строка 'Итого'.")
+    row = total.iloc[0]
+    hours = float(pd.to_numeric(pd.Series([row[c_h]]),
+                                errors="coerce").fillna(0).iloc[0])
+    revenue = float(pd.to_numeric(pd.Series([row[c_r]]),
+                                  errors="coerce").fillna(0).iloc[0])
+    return hours, revenue, df_raw
 
 
-def potential_totals(potential_df):
-    row = potential_df[potential_df["Специализация"] == "Итого"].iloc[0]
-    return (float(row["Рабочих часов всего"]),
-            float(row["Потенциал"]))
-
-
-def write_main_report(month_label, main_df, potential_df, pot_hours,
+def write_main_report(month_label, main_df, potential_raw, pot_hours,
                       pot_revenue):
     """Excel с листом 'Потенциал' и листом 'Отчет по докторам'.
     Расчетные колонки — формулы Excel (как в референсе)."""
     th = CFG["overload_threshold"]
     wb = Workbook()
-    # --- лист 1: Потенциал ---
+    # --- лист 1: Потенциал (копия загруженного эталона) ---
     ws0 = wb.active
     ws0.title = "Потенциал"
+    if potential_raw is not None:
+        for i, row in potential_raw.iterrows():
+            for j, v in enumerate(row.tolist()):
+                if pd.notna(v):
+                    if isinstance(v, str) and v.strip() == "Фреболог":
+                        v = "Флеболог"  # опечатка в исходном эталоне
+                    ws0.cell(i + 1, j + 1, v)
+    for j in range(1, 10):
+        ws0.column_dimensions[get_column_letter(j)].width = 16
     bold = Font(bold=True)
-    for j, col in enumerate(POT_COLUMNS, start=1):
-        ws0.cell(1, j, col).font = bold
-    for i, row in potential_df.iterrows():
-        for j, col in enumerate(POT_COLUMNS, start=1):
-            v = row[col]
-            if v == "" or pd.isna(v):
-                continue
-            c = ws0.cell(2 + i, j, v)
-            if isinstance(v, float):
-                c.number_format = "#,##0.00"
-        if row["Специализация"] == "Итого":
-            for j in range(1, len(POT_COLUMNS) + 1):
-                ws0.cell(2 + i, j).font = bold
-    for j, col in enumerate(POT_COLUMNS, start=1):
-        ws0.column_dimensions[get_column_letter(j)].width = max(14, len(col) + 2)
 
     # --- лист 2: Отчет по докторам ---
     EXTRA = ["Главный вывод по врачу", "План действий по врачу"]
@@ -806,6 +779,8 @@ st.caption("Загрузите таблицу потенциала и 5 отче
 
 with st.sidebar:
     st.header("Файлы")
+    f_pot = st.file_uploader("Таблица потенциала (эталон)",
+                             type=["xls", "xlsx"])
     f_zag = st.file_uploader("1. Загрузка врачей (без кабинетов)",
                              type=["xls", "xlsx"])
     f_sum = st.file_uploader("2. Общая сумма", type=["xls", "xlsx"])
@@ -825,6 +800,10 @@ if not all(files):
 
 try:
     with st.spinner("Разбираю отчеты..."):
+        pot_raw, pot_hours, pot_revenue = None, None, None
+        if f_pot is not None:
+            pot_raw = read_any(f_pot)
+            pot_hours, pot_revenue, _ = parse_potential(pot_raw)
         zag_raw = read_any(f_zag)
         month_label = detect_month_label(zag_raw, default="")
         zag, norm_rate = parse_zagruzka(zag_raw)
@@ -836,8 +815,6 @@ try:
             read_any(f_svod), doctor_keys)
         main_df = build_main_table(zag, sum_by_doc, spec_by_doc, unic_by_doc,
                                    perv_by_doc, svod_by_doc, svod_clinic_total)
-        potential_df = build_potential(main_df, norm_rate)
-        pot_hours, pot_revenue = potential_totals(potential_df)
 
     month_name = st.text_input("Месяц нового столбца «Динамики» "
                                "(подставлен из отчетов)",
@@ -845,14 +822,18 @@ try:
 
     st.subheader("Отчет по докторам")
     st.dataframe(main_df, use_container_width=True, hide_index=True)
-    main_bytes = write_main_report(month_name, main_df, potential_df,
-                                   pot_hours, pot_revenue)
+    main_bytes = write_main_report(month_name, main_df, pot_raw,
+                                   pot_hours or 0, pot_revenue or 0)
     st.download_button("Скачать отчет (xlsx, 2 листа)", main_bytes,
                        "Отчет_по_докторам.xlsx")
 
     metrics = totals_for_dinamika(main_df)
-    metrics["potential_hours_total"] = pot_hours
-    metrics["potential_revenue_total"] = pot_revenue
+    metrics["potential_hours_total"] = pot_hours if pot_hours else None
+    metrics["potential_revenue_total"] = pot_revenue if pot_revenue else None
+    if f_pot is None:
+        st.warning("Таблица потенциала не загружена — лист «Потенциал» "
+                   "не будет в отчете, а строки «Мощность в часах» и "
+                   "«Потенциал по выручке» в «Динамике» останутся пустыми.")
 
     st.subheader("Файл «Динамика»")
     if f_dyn:
