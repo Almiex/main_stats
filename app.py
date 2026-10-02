@@ -102,14 +102,40 @@ def read_any(uploaded):
 
 
 def detect_month_label(df_raw, default=""):
-    """Ищет 'ПО: 27.09.2026' / 'По: ...' в шапке -> '09.2026'."""
+    """Месяц отчета = месяц, в котором больше всего дней периода.
+    Период берем из шапки ('С: 05.08.2026' / 'ПО: 05.09.2026'): даже если
+    границы идут '5-го по 5-е', выигрывает месяц с большим числом дней.
+    """
+    start = end = None
     for i in range(min(8, len(df_raw))):
         for v in df_raw.iloc[i].tolist():
-            m = re.search(r"по:\s*(\d{2})\.(\d{2})\.(\d{4})",
-                          norm_text(v))
-            if m:
-                return f"{m.group(2)}.{m.group(3)}"
-    return default
+            t = norm_text(v)
+            m1 = re.search(r"с:\s*(\d{2})\.(\d{2})\.(\d{4})", t)
+            m2 = re.search(r"по:\s*(\d{2})\.(\d{2})\.(\d{4})", t)
+            if m1:
+                start = date(int(m1.group(3)), int(m1.group(2)),
+                             int(m1.group(1)))
+            if m2:
+                end = date(int(m2.group(3)), int(m2.group(2)),
+                           int(m2.group(1)))
+    if end is None:
+        return default
+    if start is None or start > end:
+        return f"{end.strftime('%m.%Y')}"
+    # пересечение периода с каждым месяцем
+    from calendar import monthrange
+    best, best_days = None, -1
+    y, m = start.year, start.month
+    while (y, m) <= (end.year, end.month):
+        m_start = date(y, m, 1)
+        m_end = date(y, m, monthrange(y, m)[1])
+        days = (min(end, m_end) - max(start, m_start)).days + 1
+        if days > best_days:
+            best, best_days = f"{m:02d}.{y}", days
+        m += 1
+        if m == 13:
+            y, m = y + 1, 1
+    return best or default
 
 # ================== ПАРСЕРЫ ОТЧЕТОВ ==================
 
@@ -575,7 +601,8 @@ def _sheet1_extend(ws, ref, month_label, metrics):
         Lp = get_column_letter(prev_col)
         ws.cell(r, izm_new,
                 f'=IFERROR({L}{r}/{Lp}{r}-1,"")').number_format = "0.0%"
-    ws.column_dimensions[get_column_letter(izm_new)].width = 18
+    ws.column_dimensions[get_column_letter(new_col)].width = 12
+    ws.column_dimensions[get_column_letter(izm_new)].width = 20
 
 
 # метрики листа «Динамика по врачам» (порядок групп столбцов)
@@ -788,7 +815,7 @@ with st.sidebar:
                               type=["xls", "xlsx"])
     f_svod = st.file_uploader("5. Сводный по врачам с услугами и пациентами",
                               type=["xls", "xlsx"])
-    f_dyn = st.file_uploader("Референс «Динамика» (опционально)",
+    f_dyn = st.file_uploader("Файл «Динамика» предыдущего месяца",
                              type=["xls", "xlsx"])
 
 files = [f_zag, f_sum, f_unic, f_perv, f_svod]
@@ -812,8 +839,9 @@ try:
         potential_df = build_potential(main_df, norm_rate)
         pot_hours, pot_revenue = potential_totals(potential_df)
 
-    month_name = st.text_input("Название столбца нового месяца",
-                               value=month_label or "09.2026")
+    month_name = st.text_input("Месяц нового столбца «Динамики» "
+                               "(подставлен из отчетов)",
+                               value=month_label or "")
 
     st.subheader("Отчет по докторам")
     st.dataframe(main_df, use_container_width=True, hide_index=True)
@@ -833,8 +861,8 @@ try:
         st.download_button("Скачать обновленную «Динамику» (xlsx)",
                            dyn_bytes, "Динамика.xlsx")
     else:
-        st.info("Загрузите файл «Динамики» прошлого месяца — получите его "
-                "же с добавленным новым месяцем.")
+        st.info("Загрузите файл «Динамики» предыдущего месяца — получите "
+                "его же с добавленным столбцом нового месяца.")
 
     with st.expander("Диагностика: как сматчились врачи"):
         c1, c2 = st.columns(2)
