@@ -70,15 +70,24 @@ def find_header_row(df, must_have, max_scan=40):
 def build_table(df, header_row):
     t = df.iloc[header_row + 1:].copy()
     t.columns = [norm_text(c) for c in df.iloc[header_row].tolist()]
+    # дубли названий колонок (пустые хвосты, повторы в выгрузке) схлопываем
+    t = t.loc[:, ~t.columns.duplicated()]
     return t.dropna(how="all")
 
 
 def find_col(cols, key, required=True):
-    # синонимы проверяются по приоритету: первый синоним важнее
-    # порядка колонок в файле
+    # 1) точное совпадение с синонимом (по приоритету синонимов),
+    # 2) затем подстрока (по приоритету синонимов). Точное важнее:
+    # иначе «Фактическая загрузка врача» перебивает «Доктор»,
+    # а «Специализация доктора» — «Врач».
+    norms = {col: norm_text(col) for col in cols}
     for syn in CFG["columns"][key]:
-        for col in cols:
-            if syn in norm_text(col):
+        for col, n in norms.items():
+            if n == syn:
+                return col
+    for syn in CFG["columns"][key]:
+        for col, n in norms.items():
+            if syn in n:
                 return col
     if required:
         raise ValueError(f"Колонка '{key}' не найдена. Есть: {list(cols)}")
