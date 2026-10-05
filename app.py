@@ -9,7 +9,8 @@ import streamlit as st
 import yaml
 from openpyxl import Workbook
 from openpyxl.utils import get_column_letter
-from openpyxl.styles import Font, Alignment
+from openpyxl.styles import Font, Alignment, PatternFill
+from openpyxl.comments import Comment
 
 CFG = yaml.safe_load("""
 columns:
@@ -27,7 +28,7 @@ columns:
   date:         ["дата услуги", "дата первой услуги", "дата"]
   pot_hours:    ["рабочих часов всего"]
   pot_revenue:  ["потенциал"]
-service_keep: ["допплер", "узи", "прием", "приём", "эхокг", "эхо кг", "эхо-кг"]
+service_keep: ["прием", "приём"]
 to_pay_keep_value: "есть"
 stavka_norm: 148.8
 # подстроки в ФИО: такие строки не врачи (комиссии и пр.)
@@ -471,10 +472,22 @@ def write_main_report(month_label, main_df, potential_raw, pot_hours,
                        f'"Перегруз","Недогруз"))')             # Состояние
         for j in range(10, 16):
             ws.cell(r, j).number_format = "#,##0.00"
-    # Итого: суммы по врачам в базовых колонках
-    for j in range(4, 10):
+    # Итого: суммы по врачам — только D..G (часы, время, сумма, посещения).
+    # H (пациенты) и I (первичные) — ЗНАЧЕНИЯ из отчетов 20 и 41, НЕ сумма
+    # (один пациент мог быть у нескольких врачей) — выделяем цветом.
+    for j in list(range(4, 8)) + [9]:
         L = get_column_letter(j)
         ws.cell(last_r, j, f"=SUM({L}{first_r}:{L}{last_r - 1})")
+    yellow = PatternFill("solid", fgColor="FFF2CC")
+    c = ws.cell(last_r, 8, int(main_df.iloc[-1]["Кол-во пациентов"]))
+    c.fill = yellow
+    c.font = bold
+    c.comment = Comment(
+        "НЕ сумма по врачам. Методика: отчет 20 'Сводный по врачам с услугами "
+        "и пациентами' -> оставлены врачи из списка отчета загрузки -> в "
+        "'Выставление в оплату' только 'Есть' -> в услугах только "
+        "допплерография/УЗИ/приемы/эхоКГ -> удалены дубликаты пациентов -> "
+        "подсчитаны уникальные пациенты по клинике.", "KVS-app")
     for j in range(1, len(headers) + 1):
         ws.cell(last_r, j).font = bold
 
