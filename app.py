@@ -32,6 +32,10 @@ to_pay_keep_value: "есть"
 stavka_norm: 148.8
 # подстроки в ФИО: такие строки не врачи (комиссии и пр.)
 exclude_name_keywords: ["комиссия"]
+# принудительная специализация для конкретных врачей
+# (ключ: фамилия + инициалы, значение: специальность для отображения)
+doctor_spec_override:
+  "якушева е": "Терапевт"
 overload_threshold: 80
 """)
 
@@ -265,7 +269,9 @@ def parse_pervoe_obr(df_raw, month=None):
         if c_date is not None:
             d = pd.to_datetime(t[c_date], errors="coerce", format="mixed")
             t = t[d.dt.strftime("%m.%Y") == month]
-    return t[c_doc].map(doctor_key).value_counts()
+    c_card = find_col(t.columns, "card", required=False)
+    clinic_total = int(t[c_card].nunique()) if c_card is not None else int(len(t))
+    return t[c_doc].map(doctor_key).value_counts(), clinic_total
 
 
 def parse_svodnyj_patients(df_raw, doctor_keys, month=None):
@@ -329,13 +335,21 @@ def add_calc_columns(df):
     return df
 
 
-def build_main_table(zag, obs_by_spec, unic_by_doc, perv_by_doc,
-                     svod_by_doc, svod_clinic_total):
+def build_main_table(zag, obs, unic_by_doc, perv_by_doc,
+                     svod_by_doc, svod_clinic_total, perv_clinic_total=None):
     """obs_by_spec: DataFrame(key, spec, v) — суммы по парам врач+специализация.
     Врач с несколькими специализациями -> отдельная строка на каждую;
     часы/посещения/пациенты только на первой строке (Итого не задваивается)."""
+    obs = obs.copy()
+    # переопределение специальностей отдельных врачей (см. CFG)
+    ov = {_short_key(k): v for k, v in
+          (CFG.get("doctor_spec_override") or {}).items()}
+    if ov:
+        obs["spec"] = [ov.get(_short_key(k), sp)
+                       for k, sp in zip(obs["key"], obs["spec"])]
+        obs = obs.groupby(["key", "spec"], as_index=False)["v"].sum()
     by_key = {k: list(zip(g["spec"], g["v"]))
-              for k, g in obs_by_spec.groupby("key")} if len(obs_by_spec) else {}
+              for k, g in obs.groupby("key")} if len(obs) else {}
     rows = []
     for _, r in zag.iterrows():
         specs = by_key.get(r["key"]) or [("", 0.0)]
@@ -358,7 +372,12 @@ def build_main_table(zag, obs_by_spec, unic_by_doc, perv_by_doc,
         df.loc[df["_extra"], ["Кол-во пациентов", "Кол-во первичных"]] = 0
     df = add_calc_columns(df.drop(columns=["key", "_extra"]))
     tot = {c: df[c].sum() for c in MAIN_COLUMNS[2:]}
+    # Итого по клинике: пациенты — из отчета 20 (сводный, уникальные
+    # по клинике: один пациент мог быть у нескольких врачей),
+    # первичные — уникальные карты из "Первого обращения"
     tot["Кол-во пациентов"] = svod_clinic_total
+    if perv_clinic_total is not None:
+        tot["Кол-во первичных"] = perv_clinic_total
     total_row = pd.DataFrame([{MAIN_COLUMNS[0]: "Итого по клинике",
                                MAIN_COLUMNS[1]: "", **tot}])
     total_row = add_calc_columns(total_row)
@@ -836,11 +855,12 @@ try:
         doctor_keys = set(zag["key"])
         obs_by_spec = parse_obschaya_summa(read_any(f_sum))
         unic_by_doc = parse_unic_patients(read_any(f_unic))
-        perv_by_doc = parse_pervoe_obr(read_any(f_perv))
+        perv_by_doc, perv_clinic_total = parse_pervoe_obr(read_any(f_perv))
         svod_by_doc, svod_clinic_total = parse_svodnyj_patients(
             read_any(f_svod), doctor_keys)
         main_df = build_main_table(zag, obs_by_spec, unic_by_doc,
-                                   perv_by_doc, svod_by_doc, svod_clinic_total)
+                                   perv_by_doc, svod_by_doc, svod_clinic_total,
+                                   perv_clinic_total)
 
     month_name = st.text_input("Месяц нового столбца «Динамики» "
                                "(подставлен из отчетов)",
