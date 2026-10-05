@@ -10,7 +10,6 @@ import yaml
 from openpyxl import Workbook
 from openpyxl.utils import get_column_letter
 from openpyxl.styles import Font, Alignment, PatternFill
-from openpyxl.comments import Comment
 
 CFG = yaml.safe_load("""
 columns:
@@ -29,7 +28,7 @@ columns:
   pot_hours:    ["рабочих часов всего"]
   pot_revenue:  ["потенциал"]
 service_keep: ["прием", "приём"]
-to_pay_keep_value: "есть"
+to_pay_keep_value: ""
 stavka_norm: 148.8
 # подстроки в ФИО: такие строки не врачи (комиссии и пр.)
 exclude_name_keywords: ["комиссия"]
@@ -290,7 +289,10 @@ def parse_svodnyj_patients(df_raw, doctor_keys, month=None):
             d = pd.to_datetime(t[c_date], errors="coerce", format="mixed")
             t = t[d.dt.strftime("%m.%Y") == month]
     t = t[t[c_doc].map(doctor_key).isin(doctor_keys)]
-    t = t[t[c_pay].map(norm_text) == norm_text(CFG["to_pay_keep_value"])]
+    # фильтр "Выставление в оплату" отключен (берем всех пациентов врачей);
+    # чтобы вернуть: задать to_pay_keep_value: ""
+    if CFG.get("to_pay_keep_value"):
+        t = t[t[c_pay].map(norm_text) == norm_text(CFG["to_pay_keep_value"])]
     if c_srv is not None:
         keep = [norm_text(s) for s in CFG["service_keep"]]
         t = t[t[c_srv].map(lambda v: any(k in norm_text(v) for k in keep))]
@@ -482,12 +484,7 @@ def write_main_report(month_label, main_df, potential_raw, pot_hours,
     c = ws.cell(last_r, 8, int(main_df.iloc[-1]["Кол-во пациентов"]))
     c.fill = yellow
     c.font = bold
-    c.comment = Comment(
-        "НЕ сумма по врачам. Методика: отчет 20 'Сводный по врачам с услугами "
-        "и пациентами' -> оставлены врачи из списка отчета загрузки -> в "
-        "'Выставление в оплату' только 'Есть' -> в услугах только "
-        "допплерография/УЗИ/приемы/эхоКГ -> удалены дубликаты пациентов -> "
-        "подсчитаны уникальные пациенты по клинике.", "KVS-app")
+
     for j in range(1, len(headers) + 1):
         ws.cell(last_r, j).font = bold
 
