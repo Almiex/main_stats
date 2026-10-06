@@ -288,17 +288,17 @@ def parse_svodnyj_patients(df_raw, doctor_keys, month=None):
         if c_date is not None:
             d = pd.to_datetime(t[c_date], errors="coerce", format="mixed")
             t = t[d.dt.strftime("%m.%Y") == month]
-    # 1) только нужные врачи (полное совпадение ФИО со списком отчета загрузки)
-    t = t[t[c_doc].map(doctor_key).isin(doctor_keys)]
+    # 1) удаление дубликатов по столбцу с пациентами (ПЕРВЫМ шагом)
+    t = t.drop_duplicates(subset=[c_pat])
     # 2) "Выставление в оплату" = "Есть"
     if CFG.get("to_pay_keep_value"):
         t = t[t[c_pay].map(norm_text) == norm_text(CFG["to_pay_keep_value"])]
-    # 3) только услуги: допплерография / УЗИ / приемы / эхоКГ
+    # 3) только нужные врачи (полное совпадение ФИО со списком отчета загрузки)
+    t = t[t[c_doc].map(doctor_key).isin(doctor_keys)]
+    # 4) только услуги: допплерография / УЗИ / приемы / эхоКГ
     if c_srv is not None:
         keep = [norm_text(s) for s in CFG["service_keep"]]
         t = t[t[c_srv].map(lambda v: any(k in norm_text(v) for k in keep))]
-    # 4) удаление дубликатов ПОСЛЕ фильтров, по столбцу с пациентами
-    t = t.drop_duplicates(subset=[c_pat])
     return t[c_doc].map(doctor_key).value_counts(), int(len(t))
 
 
