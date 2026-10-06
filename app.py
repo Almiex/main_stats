@@ -403,11 +403,9 @@ def build_main_table(zag, obs, unic_by_doc, perv_by_doc,
     df = add_calc_columns(df.drop(columns=["key", "_extra"]))
     tot = {c: df[c].sum() for c in MAIN_COLUMNS[2:]}
     # Итого по клинике: пациенты — из отчета 20 (сводный, уникальные
-    # по клинике: один пациент мог быть у нескольких врачей),
-    # первичные — уникальные карты из "Первого обращения"
+    # по клинике: один пациент мог быть у нескольких врачей);
+    # первичные — как все прочие: Итого = сумма по врачам из отчета
     tot["Кол-во пациентов"] = svod_clinic_total
-    if perv_clinic_total is not None:
-        tot["Кол-во первичных"] = perv_clinic_total
     total_row = pd.DataFrame([{MAIN_COLUMNS[0]: "Итого по клинике",
                                MAIN_COLUMNS[1]: "", **tot}])
     total_row = add_calc_columns(total_row)
