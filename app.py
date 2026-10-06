@@ -27,8 +27,8 @@ columns:
   date:         ["дата услуги", "дата первой услуги", "дата"]
   pot_hours:    ["рабочих часов всего"]
   pot_revenue:  ["потенциал"]
-service_keep: ["прием", "приём"]
-to_pay_keep_value: ""
+service_keep: ["допплер", "узи", "прием", "приём", "эхокг", "эхо кг", "эхо-кг"]
+to_pay_keep_value: "есть"
 stavka_norm: 148.8
 # подстроки в ФИО: такие строки не врачи (комиссии и пр.)
 exclude_name_keywords: ["комиссия"]
@@ -288,16 +288,18 @@ def parse_svodnyj_patients(df_raw, doctor_keys, month=None):
         if c_date is not None:
             d = pd.to_datetime(t[c_date], errors="coerce", format="mixed")
             t = t[d.dt.strftime("%m.%Y") == month]
+    # 1) только нужные врачи (полное совпадение ФИО со списком отчета загрузки)
     t = t[t[c_doc].map(doctor_key).isin(doctor_keys)]
-    # фильтр "Выставление в оплату" отключен (берем всех пациентов врачей);
-    # чтобы вернуть: задать to_pay_keep_value: ""
+    # 2) "Выставление в оплату" = "Есть"
     if CFG.get("to_pay_keep_value"):
         t = t[t[c_pay].map(norm_text) == norm_text(CFG["to_pay_keep_value"])]
+    # 3) только услуги: допплерография / УЗИ / приемы / эхоКГ
     if c_srv is not None:
         keep = [norm_text(s) for s in CFG["service_keep"]]
         t = t[t[c_srv].map(lambda v: any(k in norm_text(v) for k in keep))]
-    t = t.drop_duplicates(subset=[c_doc, c_id])
-    return t[c_doc].map(doctor_key).value_counts(), int(t[c_id].nunique())
+    # 4) удаление дубликатов ПОСЛЕ фильтров, по столбцу с пациентами
+    t = t.drop_duplicates(subset=[c_pat])
+    return t[c_doc].map(doctor_key).value_counts(), int(len(t))
 
 
 
