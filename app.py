@@ -17,7 +17,8 @@ columns:
   spec:         ["специализация доктора", "специализация", "специальность"]
   hours_plan:   ["часов по табелю", "рабочих часов по графику"]
   hours_patient: ["часов по записи", "часов по дошедшим", "время с пациентом"]
-  visits:       ["дошедших пациентов", "количество услуг", "кол-во посещений", "посещений"]
+  visits:       ["дошедших пациентов", "кол-во посещений", "посещений"]
+  visits_alt:   ["количество услуг"]
   sum_rub:      ["сумма фактич", "общая сумма", "сумма"]
   patient:      ["пациентов", "кол-во пациентов", "фио пациента"]
   card:         ["комп. номер", "номер карты"]
@@ -32,6 +33,9 @@ to_pay_keep_value: "есть"
 stavka_norm: 148.8
 # подстроки в ФИО: такие строки не врачи (комиссии и пр.)
 exclude_name_keywords: ["комиссия"]
+# у этих специализаций посещения = "Количество услуг" (повторные
+# обращения одного пациента видны только там), остальным = "Дошедших"
+visits_uzi_specs: ["врач ультразвуковой диагностики", "врач функциональной диагностики"]
 # принудительная специализация для конкретных врачей
 # (ключ: фамилия + инициалы, значение: специальность для отображения)
 doctor_spec_override:
@@ -206,6 +210,19 @@ def parse_zagruzka(df_raw, month=None):
             return False
         return not _is_total(doc)
 
+    # специализация врача — берем из строк по дням (там она заполнена)
+    spec_map = {}
+    cur = None
+    for _, r in t.iterrows():
+        doc = str(r[c_doc]).strip()
+        if DATE_RE.match(doc):
+            sp = str(r[c_spec]).strip()
+            if sp.lower() not in ("", "nan", "none") and cur:
+                spec_map[cur] = sp
+        else:
+            if is_doctor_row(r):
+                cur = doctor_key(doc)
+
     t = t[t.apply(is_doctor_row, axis=1)]
 
     def num(key):
@@ -214,13 +231,21 @@ def parse_zagruzka(df_raw, month=None):
             return 0.0
         return pd.to_numeric(t[col], errors="coerce").fillna(0)
 
+    uzi_specs = [norm_text(x) for x in CFG.get("visits_uzi_specs", [])]
+    is_uzi = t[c_doc].map(doctor_key).map(
+        lambda k: any(u in norm_text(spec_map.get(k, "")) for u in uzi_specs))
+    visits = num("visits")
+    if is_uzi.any():
+        visits = visits.copy()
+        visits[is_uzi] = num("visits_alt")[is_uzi]
+
     df = pd.DataFrame({
         "key": t[c_doc].map(doctor_key),
         "ФИО врача": t[c_doc].astype(str).str.strip(),
         "Специализация": "",
         "Рабочих часов по графику": num("hours_plan"),
         "Время с пациентом": num("hours_patient"),
-        "Кол-во посещений": num("visits"),
+        "Кол-во посещений": visits,
     })
     return df, norm_rate
 
