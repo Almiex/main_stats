@@ -478,7 +478,6 @@ def write_main_report(month_label, main_df, potential_raw, pot_hours,
     EXTRA = ["Главный вывод по врачу", "План действий по врачу"]
     ws = wb.create_sheet("Отчет по докторам")
     ws.cell(1, 1, f"Отчет по докторам, {month_label}").font = bold
-    ws.cell(2, 1, f"Отчет по докторам, {month_label}").font = bold
     headers = ["№"] + MAIN_COLUMNS + CALC_COLUMNS + EXTRA
     for j, col in enumerate(headers, start=1):
         c = ws.cell(3, j, col)
@@ -521,26 +520,32 @@ def write_main_report(month_label, main_df, potential_raw, pot_hours,
     for j in range(1, len(headers) + 1):
         ws.cell(last_r, j).font = bold
 
-        # --- блок под таблицей: все формулами, привязка к Итого ---
-    # (позиции считаются от last_r — строка "Итого по клинике",
-    #  поэтому при изменении числа врачей/специализаций все ссылки остаются верными)
+        # --- блок под таблицей (по спецификации, позиции от строки Итого) ---
     L_hours, L_sum = f"D{last_r}", f"F{last_r}"
-    r0 = last_r + 2                     # строка 64 в референсе
-    ptr = pot_total_row                 # строка Итого на листе Потенциал
-    # строка r0: ставки-эквивалент (D), Исп мощности (D+1), Дост потенциала (F+1),
-    #            средний фактический час (E)
-    ws.cell(r0, 4, f"={L_hours}/148.8").number_format = "0.000"
-    c = ws.cell(r0, 5, f"={L_hours}/'Потенциал'!E{ptr}*100")
+    L_fh = f"J{last_r}"  # стоимость фактического часа в Итого
+    r0 = last_r + 2      # первая строка блока (через 1 строку после Итого)
+    ptr = pot_total_row  # строка Итого на листе Потенциал (1-based)
+    # строка r0: Исп мощности (D), Дост потенциала (F)
+    c = ws.cell(r0, 4, f"={L_hours}/'Потенциал'!E{ptr}*100")
     c.number_format = "0.00"; c.font = bold
-    ws.cell(r0, 6, f"=AVERAGE(K{first_r}:K{last_r - 1})").number_format = "0.000"
-    c = ws.cell(r0, 7, f"={L_sum}/'Потенциал'!H{ptr}*100")
+    c = ws.cell(r0, 6, f"={L_sum}/'Потенциал'!H{ptr}*100")
     c.number_format = "0.00"; c.font = bold
-    # строка r0+1: подписи под значениями
+    # строка r0+1: подписи
     ws.cell(r0 + 1, 4, "Исп мощности").font = bold
     ws.cell(r0 + 1, 6, "Дост потенциала").font = bold
-    # далее: Альтернативный потенциал, Разница, Вывод — подписи для ручного заполнения
-    for k, label in enumerate(["Альтернативный потенциал", "Разница с классическим", "Вывод"]):
-        ws.cell(r0 + 2 + k, 5, label).font = bold
+    # строка r0+2: пусто
+    # строка r0+3: Альтернативный потенциал (D — подпись, F — формула)
+    ws.cell(r0 + 3, 4, "Альтернативный потенциал").font = bold
+    c = ws.cell(r0 + 3, 6, f"={L_sum}/((D{r0}/100)*({L_fh}/80))")
+    c.number_format = "0.00"; c.font = bold
+    # строка r0+4: пусто
+    # строка r0+5: Разница с классическим (D — подпись, F — формула)
+    ws.cell(r0 + 5, 4, "Разница с классическим").font = bold
+    c = ws.cell(r0 + 5, 6, f"=F{r0 + 3}-'Потенциал'!H{ptr}")
+    c.number_format = "0.00"; c.font = bold
+    # строка r0+6: пусто
+    # строка r0+7: Вывод
+    ws.cell(r0 + 7, 4, "Вывод").font = bold
     for j, col in enumerate(headers, start=1):
         ws.column_dimensions[get_column_letter(j)].width = max(12, len(col) // 2 + 4)
     buf = BytesIO()
