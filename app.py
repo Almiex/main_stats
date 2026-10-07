@@ -434,7 +434,7 @@ POT_COLUMNS = ["Специализация", "Норма ставки", "Кол�
 
 def parse_potential(df_raw):
     """Таблица потенциала (эталон, загружается файлом).
-    Возвращает (часы_итого, потенциал_итого, сырой df для копии листа)."""
+    Возвращает (часы_итого, потенциал_итого, сырой df, позиция_строки_итого)."""
     hr = find_header_row(df_raw, must_have=("потенциал", "рабочих часов"))
     t = build_table(df_raw, hr)
     c_h = find_col(t.columns, "pot_hours")
@@ -448,11 +448,14 @@ def parse_potential(df_raw):
                                 errors="coerce").fillna(0).iloc[0])
     revenue = float(pd.to_numeric(pd.Series([row[c_r]]),
                                   errors="coerce").fillna(0).iloc[0])
-    return hours, revenue, df_raw
+    # позиция строки Итого в исходном df (1-based) для ссылок вида 'Потенциал'!E14
+    total_idx = total.index[0]
+    pot_total_row = int(total_idx) + 1
+    return hours, revenue, df_raw, pot_total_row
 
 
 def write_main_report(month_label, main_df, potential_raw, pot_hours,
-                      pot_revenue):
+                      pot_revenue, pot_total_row=None):
     """Excel с листом 'Потенциал' и листом 'Отчет по докторам'.
     Расчетные колонки — формулы Excel (как в референсе)."""
     th = CFG["overload_threshold"]
@@ -518,26 +521,26 @@ def write_main_report(month_label, main_df, potential_raw, pot_hours,
     for j in range(1, len(headers) + 1):
         ws.cell(last_r, j).font = bold
 
-    # --- блок под таблицей ---
-    tot = main_df.iloc[-1]
+        # --- блок под таблицей: все формулами, привязка к Итого ---
+    # (позиции считаются от last_r — строка "Итого по клинике",
+    #  поэтому при изменении числа врачей/специализаций все ссылки остаются верными)
+    L_hours, L_sum = f"D{last_r}", f"F{last_r}"
     r0 = last_r + 2
-    ws.cell(r0, 4, round(float(tot["Рабочих часов по графику"]) / 1.488, 3))
-    ws.cell(r0, 6, round(float(pd.to_numeric(
-        main_df["Стоимость фактического часа"], errors="coerce")
-        .iloc[:-1].mean()), 3))
-    block = [("Исп мощности",
-              round(float(tot["Рабочих часов по графику"]) / pot_hours * 100, 2)
-              if pot_hours else None),
-             ("Дост потенциала",
-              round(float(tot["Стоимость оказанных услуг(руб)"]) / pot_revenue * 100, 2)
-              if pot_revenue else None),
-             ("Альтернативный потенциал", None),
-             ("Разница с классическим", None),
-             ("Вывод", None)]
-    for k, (label, val) in enumerate(block):
-        ws.cell(r0 + 1 + k, 5, label).font = bold
-        if val is not None:
-            ws.cell(r0 + 1 + k, 7, val)
+    # ставки-эквивалент: рабочие часы / норма ставки (148.8)
+    ws.cell(r0, 4, f"={L_hours}/148.8").number_format = "0.000"
+    # средний фактический час по врачам (без Итого)
+    ws.cell(r0, 6, f"=AVERAGE(K{first_r}:K{last_r - 1})").number_format = "0.000"
+    # Исп мощности / Дост потенциала — формулы со ссылкой на лист Потенциал
+    ptr = pot_total_row  # строка Итого на листе Потенциал (1-based)
+    ws.cell(r0 + 1, 4, "Исп мощности").font = bold
+    c = ws.cell(r0 + 1, 5, f"={L_hours}/'Потенциал'!E{ptr}*100")
+    c.number_format = "0.00"; c.font = bold
+    ws.cell(r0 + 1, 6, "Дост потенциала").font = bold
+    c = ws.cell(r0 + 1, 7, f"={L_sum}/'Потенциал'!H{ptr}*100")
+    c.number_format = "0.00"; c.font = bold
+    # Альтернативный потенциал, Разница, Вывод — для ручного заполнения
+    for k, label in enumerate(["Альтернативный потенциал", "Разница с классическим", "Вывод"]):
+        ws.cell(r0 + 2 + k, 5, label).font = bold
     for j, col in enumerate(headers, start=1):
         ws.column_dimensions[get_column_letter(j)].width = max(12, len(col) // 2 + 4)
     buf = BytesIO()
@@ -888,7 +891,7 @@ try:
         pot_raw, pot_hours, pot_revenue = None, None, None
         if f_pot is not None:
             pot_raw = read_any(f_pot)
-            pot_hours, pot_revenue, _ = parse_potential(pot_raw)
+            pot_hours, pot_revenue, _, pot_total_row = parse_potential(pot_raw)
         zag_raw = read_any(f_zag)
         month_label = detect_month_label(zag_raw, default="")
         zag, norm_rate = parse_zagruzka(zag_raw)
@@ -909,7 +912,8 @@ try:
     st.subheader("Отчет по докторам")
     st.dataframe(main_df, use_container_width=True, hide_index=True)
     main_bytes = write_main_report(month_name, main_df, pot_raw,
-                                   pot_hours or 0, pot_revenue or 0)
+                                   pot_hours or 0, pot_revenue or 0,
+                                   pot_total_row)
     st.download_button("Скачать отчет (xlsx, 2 листа)", main_bytes,
                        "Отчет_по_докторам.xlsx")
 
