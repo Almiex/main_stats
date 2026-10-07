@@ -525,20 +525,20 @@ def write_main_report(month_label, main_df, potential_raw, pot_hours,
     # (позиции считаются от last_r — строка "Итого по клинике",
     #  поэтому при изменении числа врачей/специализаций все ссылки остаются верными)
     L_hours, L_sum = f"D{last_r}", f"F{last_r}"
-    r0 = last_r + 2
-    # ставки-эквивалент: рабочие часы / норма ставки (148.8)
+    r0 = last_r + 2                     # строка 64 в референсе
+    ptr = pot_total_row                 # строка Итого на листе Потенциал
+    # строка r0: ставки-эквивалент (D), Исп мощности (D+1), Дост потенциала (F+1),
+    #            средний фактический час (E)
     ws.cell(r0, 4, f"={L_hours}/148.8").number_format = "0.000"
-    # средний фактический час по врачам (без Итого)
+    c = ws.cell(r0, 5, f"={L_hours}/'Потенциал'!E{ptr}*100")
+    c.number_format = "0.00"; c.font = bold
     ws.cell(r0, 6, f"=AVERAGE(K{first_r}:K{last_r - 1})").number_format = "0.000"
-    # Исп мощности / Дост потенциала — формулы со ссылкой на лист Потенциал
-    ptr = pot_total_row  # строка Итого на листе Потенциал (1-based)
+    c = ws.cell(r0, 7, f"={L_sum}/'Потенциал'!H{ptr}*100")
+    c.number_format = "0.00"; c.font = bold
+    # строка r0+1: подписи под значениями
     ws.cell(r0 + 1, 4, "Исп мощности").font = bold
-    c = ws.cell(r0 + 1, 5, f"={L_hours}/'Потенциал'!E{ptr}*100")
-    c.number_format = "0.00"; c.font = bold
     ws.cell(r0 + 1, 6, "Дост потенциала").font = bold
-    c = ws.cell(r0 + 1, 7, f"={L_sum}/'Потенциал'!H{ptr}*100")
-    c.number_format = "0.00"; c.font = bold
-    # Альтернативный потенциал, Разница, Вывод — для ручного заполнения
+    # далее: Альтернативный потенциал, Разница, Вывод — подписи для ручного заполнения
     for k, label in enumerate(["Альтернативный потенциал", "Разница с классическим", "Вывод"]):
         ws.cell(r0 + 2 + k, 5, label).font = bold
     for j, col in enumerate(headers, start=1):
