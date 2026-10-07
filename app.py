@@ -448,7 +448,7 @@ def parse_potential(df_raw):
                                 errors="coerce").fillna(0).iloc[0])
     revenue = float(pd.to_numeric(pd.Series([row[c_r]]),
                                   errors="coerce").fillna(0).iloc[0])
-    # позиция строки Итого в исходном df (1-based) для ссылок вида 'Потенциал'!E14
+    # позиция строки Итого в исходном df (1-based) для ссылок вида '1. Потенциал'!E14
     total_idx = total.index[0]
     pot_total_row = int(total_idx) + 1
     return hours, revenue, df_raw, pot_total_row
@@ -462,7 +462,7 @@ def write_main_report(month_label, main_df, potential_raw, pot_hours,
     wb = Workbook()
     # --- лист 1: Потенциал (копия загруженного эталона) ---
     ws0 = wb.active
-    ws0.title = "Потенциал"
+    ws0.title = "1. Потенциал"
     if potential_raw is not None:
         for i, row in potential_raw.iterrows():
             for j, v in enumerate(row.tolist()):
@@ -480,10 +480,10 @@ def write_main_report(month_label, main_df, potential_raw, pot_hours,
     ws.cell(1, 1, f"Отчет по докторам, {month_label}").font = bold
     headers = ["№"] + MAIN_COLUMNS + CALC_COLUMNS + EXTRA
     for j, col in enumerate(headers, start=1):
-        c = ws.cell(3, j, col)
+        c = ws.cell(2, j, col)
         c.font = bold
         c.alignment = Alignment(wrap_text=True, vertical="center")
-    first_r = 4
+    first_r = 3
     last_r = first_r + len(main_df) - 1          # строка Итого
     for i, (_, row) in enumerate(main_df.iterrows()):
         r = first_r + i
@@ -526,9 +526,9 @@ def write_main_report(month_label, main_df, potential_raw, pot_hours,
     r0 = last_r + 2      # первая строка блока (через 1 строку после Итого)
     ptr = pot_total_row  # строка Итого на листе Потенциал (1-based)
     # строка r0: Исп мощности (D), Дост потенциала (F)
-    c = ws.cell(r0, 4, f"={L_hours}/'Потенциал'!E{ptr}*100")
+    c = ws.cell(r0, 4, f"={L_hours}/'1. Потенциал'!E{ptr}*100")
     c.number_format = "0.00"; c.font = bold
-    c = ws.cell(r0, 6, f"={L_sum}/'Потенциал'!H{ptr}*100")
+    c = ws.cell(r0, 6, f"={L_sum}/'1. Потенциал'!H{ptr}*100")
     c.number_format = "0.00"; c.font = bold
     # строка r0+1: подписи
     ws.cell(r0 + 1, 4, "Исп мощности").font = bold
@@ -541,7 +541,7 @@ def write_main_report(month_label, main_df, potential_raw, pot_hours,
     # строка r0+4: пусто
     # строка r0+5: Разница с классическим (D — подпись, F — формула)
     ws.cell(r0 + 5, 4, "Разница с классическим").font = bold
-    c = ws.cell(r0 + 5, 6, f"=F{r0 + 3}-'Потенциал'!H{ptr}")
+    c = ws.cell(r0 + 5, 6, f"=F{r0 + 3}-'1. Потенциал'!H{ptr}")
     c.number_format = "0.00"; c.font = bold
     # строка r0+6: пусто
     # строка r0+7: Вывод
