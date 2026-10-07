@@ -322,10 +322,11 @@ def parse_svodnyj_patients(df_raw, doctor_keys, month=None):
     if c_srv is not None:
         keep = [norm_text(s) for s in CFG["service_keep"]]
         t = t[t[c_srv].map(lambda v: any(k in norm_text(v) for k in keep))]
-    # 4) удаление дубликатов по столбцу с пациентами —
-    # уникальные по всей выборке врачей (пациент у нескольких врачей = 1)
-    t = t.drop_duplicates(subset=[c_pat])
-    return t[c_doc].map(doctor_key).value_counts(), int(len(t))
+    # 4) удаление дубликатов по "Комп. номер" (карта пациента), а не по ФИО:
+    # один человек может числиться под разными написаниями ФИО у разных
+    # врачей, и тогда дедуп по ФИО теряет пересечения
+    t = t.drop_duplicates(subset=[c_doc, c_id])
+    return t[c_doc].map(doctor_key).value_counts(), int(t[c_id].nunique())
 
 
 
