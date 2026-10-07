@@ -893,6 +893,7 @@ try:
         zag, norm_rate = parse_zagruzka(zag_raw)
         doctor_keys = set(zag["key"])
         obs_by_spec = parse_obschaya_summa(read_any(f_sum))
+        unic_by_doc = parse_unic_patients(read_any(f_unic))
         perv_by_doc, perv_clinic_total = parse_pervoe_obr(read_any(f_perv))
         svod_by_doc, svod_clinic_total = parse_svodnyj_patients(
             read_any(f_svod), doctor_keys)
