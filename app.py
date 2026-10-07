@@ -16,7 +16,7 @@ columns:
   doctor:       ["врач", "фио врача", "доктор"]
   spec:         ["специализация доктора", "специализация", "специальность"]
   hours_plan:   ["часов по табелю", "рабочих часов по графику"]
-  hours_patient: ["часов по записи", "часов по дошедшим", "время с пациентом"]
+  hours_patient: ["часов по дошедшим", "время с пациентом"]
   visits:       ["дошедших пациентов", "кол-во посещений", "посещений"]
   visits_alt:   ["количество услуг"]
   sum_rub:      ["сумма фактич", "общая сумма", "сумма"]
@@ -313,17 +313,18 @@ def parse_svodnyj_patients(df_raw, doctor_keys, month=None):
         if c_date is not None:
             d = pd.to_datetime(t[c_date], errors="coerce", format="mixed")
             t = t[d.dt.strftime("%m.%Y") == month]
-    # 1) удаление дубликатов по столбцу с пациентами (ПЕРВЫМ шагом)
-    t = t.drop_duplicates(subset=[c_pat])
-    # 2) "Выставление в оплату" = "Есть"
+    # 1) "Выставление в оплату" = "Есть"
     if CFG.get("to_pay_keep_value"):
         t = t[t[c_pay].map(norm_text) == norm_text(CFG["to_pay_keep_value"])]
-    # 3) только нужные врачи (полное совпадение ФИО со списком отчета загрузки)
+    # 2) только нужные врачи (полное совпадение ФИО со списком отчета загрузки)
     t = t[t[c_doc].map(doctor_key).isin(doctor_keys)]
-    # 4) только услуги: допплерография / УЗИ / приемы / эхоКГ
+    # 3) только услуги: допплерография / УЗИ / приемы / эхоКГ
     if c_srv is not None:
         keep = [norm_text(s) for s in CFG["service_keep"]]
         t = t[t[c_srv].map(lambda v: any(k in norm_text(v) for k in keep))]
+    # 4) удаление дубликатов по столбцу с пациентами —
+    # уникальные по всей выборке врачей (пациент у нескольких врачей = 1)
+    t = t.drop_duplicates(subset=[c_pat])
     return t[c_doc].map(doctor_key).value_counts(), int(len(t))
 
 
@@ -396,7 +397,10 @@ def build_main_table(zag, obs, unic_by_doc, perv_by_doc,
     df = pd.DataFrame(rows)
     # по ТЗ: по врачам — из "Уникальных пациентов за период"
     # (выгружать за нужный месяц), Итого по клинике — из сводного
-    df["Кол-во пациентов"] = df["key"].map(unic_by_doc).fillna(0).astype(int)
+    # Кол-во пациентов: уникальные по каждому врачу из отчета 20
+    # (после фильтров; один пациент у нескольких врачей НЕ дублируется,
+    # так как сводный расчет идет по врачам)
+    df["Кол-во пациентов"] = df["key"].map(svod_by_doc).fillna(0).astype(int)
     df["Кол-во первичных"] = df["key"].map(perv_by_doc).fillna(0).astype(int)
     if df["_extra"].any():  # пациенты/первичные только на основной строке
         df.loc[df["_extra"], ["Кол-во пациентов", "Кол-во первичных"]] = 0
@@ -889,7 +893,6 @@ try:
         zag, norm_rate = parse_zagruzka(zag_raw)
         doctor_keys = set(zag["key"])
         obs_by_spec = parse_obschaya_summa(read_any(f_sum))
-        unic_by_doc = parse_unic_patients(read_any(f_unic))
         perv_by_doc, perv_clinic_total = parse_pervoe_obr(read_any(f_perv))
         svod_by_doc, svod_clinic_total = parse_svodnyj_patients(
             read_any(f_svod), doctor_keys)
