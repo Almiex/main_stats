@@ -73,9 +73,12 @@ def _round_half_up(v):
 
 def _autofit(ws, min_w=6, max_w=45):
     """Ширина колонок — по длине отображаемого текста."""
+    merged = ws.merged_cells
     for col in range(1, ws.max_column + 1):
         longest = max((len(_cell_disp_text(ws.cell(r, col)))
-                       for r in range(1, ws.max_row + 1)), default=0)
+                       for r in range(1, ws.max_row + 1)
+                       if ws.cell(r, col).coordinate not in merged),
+                      default=0)
         ws.column_dimensions[get_column_letter(col)].width = min(
             max(longest + 2, min_w), max_w)
 
@@ -182,6 +185,24 @@ def detect_month_label(df_raw, default=""):
         if m == 13:
             y, m = y + 1, 1
     return best or default
+
+def detect_clinic_name(df_raw):
+    """Название клиники из шапки отчета 'Загрузка врачей'. Место фиксировано:
+    ячейка вида 'Клиника: 001, ООО "Клиника в Северном"'. Берём часть после
+    'Клиника: <код>,' — само название (в оригинальном регистре). Если
+    ячейка не найдена — пустая строка (заголовок отчёта не меняется)."""
+    for i in range(min(12, len(df_raw))):
+        for v in df_raw.iloc[i].tolist():
+            t = str(v).strip()
+            m = re.match(r"^клиника:\s*[^,]+,\s*(.+)$", t,
+                         flags=re.IGNORECASE)
+            if m:
+                return m.group(1).strip()
+            m = re.match(r"^клиника:\s*(.+)$", t, flags=re.IGNORECASE)
+            if m:
+                return m.group(1).strip()
+    return ""
+
 
 # ================== ПАРСЕРЫ ОТЧЕТОВ ==================
 
@@ -531,7 +552,7 @@ def parse_potential(df_raw):
 
 
 def write_main_report(month_label, main_df, potential_raw, pot_hours,
-                      pot_revenue, pot_total_row=None):
+                      pot_revenue, pot_total_row=None, clinic_name=""):
     """Excel с листом 'Потенциал' и листом 'Отчет по докторам'.
     Расчетные колонки — формулы Excel (как в референсе)."""
     th = CFG["overload_threshold"]
@@ -607,8 +628,15 @@ def write_main_report(month_label, main_df, potential_raw, pot_hours,
     # --- лист 2: Отчет по докторам ---
     EXTRA = ["Главный вывод по врачу", "План действий по врачу"]
     ws = wb.create_sheet("Отчет по докторам")
-    ws.cell(1, 1, f"Отчет по докторам, {month_label}").font = bold
+    title = (f"{clinic_name}. Отчет по докторам, {month_label}"
+             if clinic_name else f"Отчет по докторам, {month_label}")
+    ws.cell(1, 1, title).font = F_BOLD
     headers = ["№"] + MAIN_COLUMNS + CALC_COLUMNS + EXTRA
+    # строка 1 объединена по ширине таблицы и не влияет на ширину колонок
+    ws.merge_cells(start_row=1, start_column=1,
+                   end_row=1, end_column=len(headers))
+    ws.cell(1, 1).alignment = Alignment(horizontal="center",
+                                        vertical="center")
     for j, col in enumerate(headers, start=1):
         c = ws.cell(2, j, col)
         c.font = bold
@@ -1178,9 +1206,10 @@ try:
 
     st.subheader("Отчет по докторам")
     st.dataframe(main_df, use_container_width=True, hide_index=True)
+    clinic_name = detect_clinic_name(zag_raw)
     main_bytes = write_main_report(month_name, main_df, pot_raw,
                                    pot_hours or 0, pot_revenue or 0,
-                                   pot_total_row)
+                                   pot_total_row, clinic_name)
     st.download_button("Скачать отчет (xlsx, 2 листа)", main_bytes,
                        "Отчет_по_докторам.xlsx")
 
