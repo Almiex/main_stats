@@ -700,11 +700,14 @@ MANUAL = {"мощность в часах": "potential_hours_total",
 
 
 def _sheet1_extend(ws, ref, month_label, metrics):
-    """Лист ДИНАМИКА: новый столбец после последнего месяца.
-    ВСЕ ячейки нового столбца пишутся ВЫЧИСЛЕННЫМИ ЗНАЧЕНИЯМИ, без формул:
-    openpyxl формулы не считает и кэшированных значений в файле нет, поэтому
-    при просмотре/импорте без пересчёта Excel такие ячейки выглядят пустыми.
-    'Изм в %' тоже считаем в Python по кэшированным значениям прошлого месяца."""
+    """Лист ДИНАМИКА: столбец месяца (новый или перезапись существующего).
+    ВСЕ ячейки пишутся ВЫЧИСЛЕННЫМИ ЗНАЧЕНИЯМИ, без формул: openpyxl формулы
+    не считает и кэшированных значений в файле нет — без пересчёта Excel такие
+    ячейки выглядят пустыми. 'Изм в %' тоже считаем в Python.
+    Заголовки ВСЕХ месяцев приводим к виду 'MM.YY' (08.25, 09.26): в исходнике
+    они смешанные — Excel-сериалы, даты с часами, строки '12.25'/'09.2026'.
+    Месяц ищется по дате (сериал/дата/'MM.YY'/'MM.YYYY') — если колонка уже
+    есть (например, с некорректными данными), она ПЕРЕЗАПИСЫВАется на месте."""
     hdr = next(i for i in range(10) if ref.iloc[i].notna().sum() >= 3)
     hdr_row = hdr + 1                    # строка заголовка на листе (1-based)
     header = ref.iloc[hdr].tolist()
@@ -713,23 +716,49 @@ def _sheet1_extend(ws, ref, month_label, metrics):
     izm_col = next(i for i, v in enumerate(header) if "изм" in norm_text(v))
     month_cols = [i for i in range(param_col + 1, izm_col)
                   if pd.notna(header[i])]
-    body = ref.iloc[hdr + 1:].dropna(how="all")
+    # ВАЖНО: без dropna — пустые строки внутри тела (например, перед блоком
+    # 'Альтернативный потенциал') сохраняют соответствие позиций листа
+    body = ref.iloc[hdr + 1:]
     labels = body[param_col].tolist()
-    first_data_row = hdr_row + 1         # первая строка данных на листе
+    first_data_row = hdr_row + 1
 
-    # ищем существующий столбец с этим месяцем И ГОДОМ — если есть, перезаписываем
     def _month_year(v):
+        """(месяц, год) из даты/Excel-сериала/'MM.YY'/'MM.YYYY' или None."""
+        if isinstance(v, pd.Timestamp):
+            return (int(v.month), int(v.year))
         if isinstance(v, (datetime, date)):
             return (int(v.strftime("%m")), int(v.strftime("%Y")))
-        m = re.match(r"(\d{2})\.(\d{4})", str(v))
+        if isinstance(v, (int, float)) and not isinstance(v, bool) \
+                and 40000 < float(v) < 60000:          # Excel-сериал
+            d = date(1899, 12, 30) + timedelta(days=int(v))
+            return (d.month, d.year)
+        s = str(v).strip()
+        if re.match(r"^\d{5}$", s):                    # сериал текстом
+            return _month_year(int(s))
+        m = re.match(r"^(\d{1,2})\.(\d{4})$", s)
         if m:
             return (int(m.group(1)), int(m.group(2)))
+        m = re.match(r"^(\d{1,2})\.(\d{2})$", s)
+        if m:
+            return (int(m.group(1)), 2000 + int(m.group(2)))
         return None
+
+    def _month_short(v):
+        my = _month_year(v)
+        return f"{my[0]:02d}.{my[1] % 100:02d}" if my else None
+
+    # нормализуем заголовки ВСЕХ месяцев к 'MM.YY'
+    for c in range(param_col + 2, ws.max_column + 1):
+        s = _month_short(ws.cell(hdr_row, c).value)
+        if s is not None:
+            ws.cell(hdr_row, c, s)
+
     tgt = _month_year(month_label)
-    tgt_txts = {month_label, f"{tgt[0]}.{tgt[1]}", f"{tgt[0]:02d}.{tgt[1]}"}
+    tgt_short = f"{tgt[0]:02d}.{tgt[1] % 100:02d}"
+    tgt_txts = {str(month_label).strip(), tgt_short,
+                f"{tgt[0]:02d}.{tgt[1]}", f"{tgt[0]}.{tgt[1]}"}
     new_col = None
     dup_cols = []
-    # ищем В СТРОКЕ ЗАГОЛОВКА hdr_row (а не в первой строке листа)
     for c in range(3, ws.max_column + 1):
         v = ws.cell(hdr_row, c).value
         v_txt = str(v).strip().replace(" ", "")
@@ -738,20 +767,21 @@ def _sheet1_extend(ws, ref, month_label, metrics):
                 new_col = c
             else:
                 dup_cols.append(c)
-    # удаляем дубли (справа налево)
     for c in sorted(dup_cols, reverse=True):
         ws.delete_cols(c)
+    inserted = False
     if new_col is None:
         # вставляем новый столбец (после последнего месяца, перед Изм)
         insert_at = 3 + len(month_cols)
         ws.insert_cols(insert_at)
         new_col = insert_at
+        inserted = True
     prev_col = new_col - 1
     izm_new = new_col + 1
 
-    # заголовки — в строку заголовка hdr_row
-    ws.cell(hdr_row, new_col, month_label).font = Font(bold=True)
-    ws.cell(hdr_row, izm_new, "Изм в %").font = Font(bold=True)
+    ws.cell(hdr_row, new_col, tgt_short).font = Font(bold=True)
+    if inserted:
+        ws.cell(hdr_row, izm_new, "Изм в %").font = Font(bold=True)
 
     # --- все производные метрики считаем здесь, в Python (не формулами!) ---
     def _g(k):
@@ -767,6 +797,7 @@ def _sheet1_extend(ws, ref, month_label, metrics):
         v = _div(a, b)
         return v * 100 if v is not None else None
 
+    th = CFG["overload_threshold"]
     pot_h = _g("potential_hours_total")
     pot_r = _g("potential_revenue_total")
     s_sum = _g("main_total_sum")
@@ -774,18 +805,30 @@ def _sheet1_extend(ws, ref, month_label, metrics):
     s_hp = _g("main_total_hours_patient")
     s_fl = _g("main_total_patients")
     s_vis = _g("main_total_visits")
+    s_first = _g("main_total_first")
+    isp_v = _pct(s_hours, pot_h)         # коэффициент использования мощности
+    zagr_v = _pct(s_hp, s_hours)         # % загруженности
+    alt_v = None
+    if s_sum is not None and isp_v and zagr_v:
+        denom = (isp_v / 100) * (zagr_v / 100) / (th / 100)
+        if denom:
+            alt_v = s_sum / denom
     derived_vals = {
-        "коэффициент использования мощности": _pct(s_hours, pot_h),
+        "коэффициент использования мощности": isp_v,
         "% достижения потенциала": _pct(s_sum, pot_r),
-        "% загруженности клиники": _pct(s_hp, s_hours),
+        "% загруженности клиники": zagr_v,
+        "% загруженности врачей": zagr_v,
         "стоимость помощи на фл": _div(s_sum, s_fl),
         "посещений на фл": _div(s_vis, s_fl),
         "стоимость посещения": _div(s_sum, s_vis),
+        "% первичных к фл": _pct(s_first, s_fl),
+        "альтернативный потенциал": alt_v,
+        "разница с классическим": (alt_v - pot_r)
+        if alt_v is not None and pot_r is not None else None,
     }
 
     # значения предыдущего месяца (для 'Изм в %') берём из ref: pandas
-    # читает кэшированные значения ячеек, поэтому формулы старых месяцев
-    # в референсе нам не мешают
+    # читает кэшированные значения ячеек, формулы старых месяцев не мешают
     prev_vals = pd.to_numeric(body[prev_col - 1], errors="coerce")
 
     for r_off, label in enumerate(labels):
@@ -807,6 +850,10 @@ def _sheet1_extend(ws, ref, month_label, metrics):
                 c.number_format = "#,##0.0"
             else:
                 c.number_format = "#,##0.00"
+        else:
+            # строка не рассчитывается (пустая/служебная): стираем старое
+            # значение перезаписываемого месяца, чтобы не осталось мусора
+            ws.cell(r, new_col).value = None
         pv = prev_vals.iloc[r_off] if r_off < len(prev_vals) else None
         if (val is not None and pv is not None
                 and pd.notna(pv) and float(pv) != 0):
