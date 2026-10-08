@@ -918,10 +918,15 @@ if not all(files):
 
 try:
     with st.spinner("Разбираю отчеты..."):
-        pot_raw, pot_hours, pot_revenue = None, None, None
+        pot_raw, pot_hours, pot_revenue, pot_total_row = None, None, None, None
         if f_pot is not None:
             pot_raw = read_any(f_pot)
             pot_hours, pot_revenue, _, pot_total_row = parse_potential(pot_raw)
+        else:
+            st.warning("⚠️ Таблица потенциала не загружена — лист «1. Потенциал» "
+                       "не будет в отчете, а «Динамика» не сможет заполнить строки "
+                       "«Мощность в часах» и «Потенциал по выручке». "
+                       "Загрузите файл с эталоном потенциала.")
         zag_raw = read_any(f_zag)
         month_label = detect_month_label(zag_raw, default="")
         zag, norm_rate = parse_zagruzka(zag_raw)
