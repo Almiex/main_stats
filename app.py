@@ -417,14 +417,19 @@ def build_main_table(zag, obs, unic_by_doc, perv_by_doc,
     return pd.concat([df, total_row], ignore_index=True)[ALL_COLUMNS]
 
 
-def totals_for_dinamika(main_df):
+def totals_for_dinamika(main_df, pot_hours=None, pot_revenue=None):
     row = main_df[main_df["ФИО врача"] == "Итого по клинике"].iloc[0]
-    return {"main_total_sum": row["Стоимость оказанных услуг(руб)"],
-            "main_total_hours_plan": row["Рабочих часов по графику"],
-            "main_total_hours_patient": row["Время с пациентом"],
-            "main_total_patients": row["Кол-во пациентов"],
-            "main_total_visits": row["Кол-во посещений"],
-            "main_total_first": row["Кол-во первичных"]}
+    out = {"main_total_sum": row["Стоимость оказанных услуг(руб)"],
+           "main_total_hours_plan": row["Рабочих часов по графику"],
+           "main_total_hours_patient": row["Время с пациентом"],
+           "main_total_patients": row["Кол-во пациентов"],
+           "main_total_visits": row["Кол-во посещений"],
+           "main_total_first": row["Кол-во первичных"]}
+    if pot_hours:
+        out["main_isp"] = row["Рабочих часов по графику"] / pot_hours * 100
+    if pot_revenue:
+        out["main_dost"] = row["Стоимость оказанных услуг(руб)"] / pot_revenue * 100
+    return out
 
 
 POT_COLUMNS = ["Специализация", "Норма ставки", "Количество ставок",
@@ -622,6 +627,8 @@ DERIVED = {
 }
 MANUAL = {"мощность в часах": "potential_hours_total",
           "потенциал по выручке": "potential_revenue_total",
+          "коэффициент использования мощности": "main_isp",
+          "% достижения потенциала": "main_dost",
           "стоимость помощи": "main_total_sum",
           "рабочие часы врачей": "main_total_hours_plan",
           "часы с пациентом": "main_total_hours_patient",
@@ -952,7 +959,7 @@ try:
     st.download_button("Скачать отчет (xlsx, 2 листа)", main_bytes,
                        "Отчет_по_докторам.xlsx")
 
-    metrics = totals_for_dinamika(main_df)
+    metrics = totals_for_dinamika(main_df, pot_hours, pot_revenue)
     metrics["potential_hours_total"] = pot_hours if pot_hours else None
     metrics["potential_revenue_total"] = pot_revenue if pot_revenue else None
     if f_pot is None:
