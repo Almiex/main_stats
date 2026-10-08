@@ -510,22 +510,49 @@ def write_main_report(month_label, main_df, potential_raw, pot_hours,
                     if isinstance(v, str) and v.strip() == "Фреболог":
                         v = "Флеболог"  # опечатка в исходном эталоне
                     ws0.cell(i + 1, j + 1, v)
-        # строки со специализациями: E=C*D, H=E*F*G; строка Итого: суммы по столбцам
-        hr0 = find_header_row(potential_raw, must_have=("потенциал", "рабочих часов"))
+        # Формулы пишем по РЕАЛЬНЫМ позициям колонок загруженного эталона
+        # (порядок/набор колонок может отличаться): часы_всего = ставки *
+        # часы_на_ставку, потенциал = часы_всего * цена * загрузка.
+        # Ничего не хардкодим: позиции ищем по именам в строке заголовка.
+        hr0 = find_header_row(potential_raw,
+                              must_have=("потенциал", "рабочих часов"))
+        header0 = [norm_text(c) for c in potential_raw.iloc[hr0].tolist()]
+
+        def _col0(*subs, exclude=None):
+            for idx, h in enumerate(header0):
+                if all(s in h for s in subs) and idx != exclude:
+                    return idx + 1  # 1-based номер колонки
+            return None
+
+        L = get_column_letter
+        c_pot_h = _col0("часов", "всего") or _col0("часов")
+        c_st = _col0("количество", "ставок")
+        c_hr = _col0("часов", exclude=c_pot_h - 1 if c_pot_h else None)
+        c_pr = _col0("стоимость", "часа")
+        c_ld = _col0("загрузк")
+        c_pot = _col0("потенциал")
+        c_sp = _col0("специализация")
         first_spec = hr0 + 2
         last_spec = None
         for r in range(hr0 + 2, potential_raw.shape[0] + 1):
-            spec = str(potential_raw.iloc[r - 1, 1]).strip()
+            spec = str(potential_raw.iloc[r - 1, (c_sp or 2) - 1]).strip()
             if spec and spec.lower() not in ("nan", "none", "специализация"):
                 if not _is_total(spec):
-                    ws0.cell(r, 5, f"=C{r}*D{r}")
-                    ws0.cell(r, 8, f"=E{r}*F{r}*G{r}")
+                    if c_pot_h and c_st and c_hr:
+                        ws0.cell(r, c_pot_h,
+                                 f"={L(c_st)}{r}*{L(c_hr)}{r}")
+                    if c_pot and c_pot_h and c_pr and c_ld:
+                        ws0.cell(r, c_pot,
+                                 f"={L(c_pot_h)}{r}*{L(c_pr)}{r}*"
+                                 f"{L(c_ld)}{r}")
                     last_spec = r
                 else:
                     # Итого: суммы по всем специализациям
-                    ws0.cell(r, 4, f"=SUM(D{first_spec}:D{last_spec})")
-                    ws0.cell(r, 5, f"=SUM(E{first_spec}:E{last_spec})")
-                    ws0.cell(r, 8, f"=SUM(H{first_spec}:H{last_spec})")
+                    for cc in (c_st, c_pot_h, c_pot):
+                        if cc and last_spec:
+                            ws0.cell(r, cc,
+                                     f"=SUM({L(cc)}{first_spec}:"
+                                     f"{L(cc)}{last_spec})")
                     break
     for j in range(1, 10):
         ws0.column_dimensions[get_column_letter(j)].width = 16
@@ -593,7 +620,7 @@ def write_main_report(month_label, main_df, potential_raw, pot_hours,
     # строка r0+2: пусто
     # строка r0+3: Альтернативный потенциал (D — подпись, F — формула)
     ws.cell(r0 + 3, 4, "Альтернативный потенциал").font = bold
-    c = ws.cell(r0 + 3, 6, f"={L_sum}/((D{r0}/100)*({L_fh}/80))")
+    c = ws.cell(r0 + 3, 6, f"={L_sum}/((D{r0}/100)*({L_fh}/{th}))")
     c.number_format = "0.00"; c.font = bold
     # строка r0+4: пусто
     # строка r0+5: Разница с классическим (D — подпись, F — формула)
@@ -770,8 +797,16 @@ def _sheet1_extend(ws, ref, month_label, metrics):
         elif k in derived_vals:
             val = derived_vals[k]
         if val is not None:
-            c = ws.cell(r, new_col, round(val, 4))
-            c.number_format = "#,##0.00"
+            rv = round(val, 4)
+            c = ws.cell(r, new_col, rv)
+            # единый вид: без хвостовых нулей (25 212 096; 5 937,5; 6 239,52)
+            r2 = round(rv, 2)
+            if abs(r2 - round(r2)) < 1e-9:
+                c.number_format = "#,##0"
+            elif abs(r2 * 10 - round(r2 * 10)) < 1e-9:
+                c.number_format = "#,##0.0"
+            else:
+                c.number_format = "#,##0.00"
         pv = prev_vals.iloc[r_off] if r_off < len(prev_vals) else None
         if (val is not None and pv is not None
                 and pd.notna(pv) and float(pv) != 0):
