@@ -640,6 +640,7 @@ MANUAL = {"мощность в часах": "potential_hours_total",
 def _sheet1_extend(ws, ref, month_label, metrics):
     """Лист ДИНАМИКА: новый столбец после последнего месяца."""
     hdr = next(i for i in range(10) if ref.iloc[i].notna().sum() >= 3)
+    hdr_row = hdr + 1                    # заголовок в 1-based координатах листа
     header = ref.iloc[hdr].tolist()
     param_col = next(i for i, v in enumerate(header)
                      if norm_text(v) == "параметр")
@@ -648,6 +649,7 @@ def _sheet1_extend(ws, ref, month_label, metrics):
                   if pd.notna(header[i])]
     body = ref.iloc[hdr + 1:].dropna(how="all")
     labels = body[param_col].tolist()
+    first_data_row = hdr_row + 1         # первая строка данных на листе
 
     # ищем существующий столбец с этим месяцем И ГОДОМ — если есть, перезаписываем
     def _month_year(v):
@@ -661,9 +663,9 @@ def _sheet1_extend(ws, ref, month_label, metrics):
     tgt_txts = {month_label, f"{tgt[0]}.{tgt[1]}", f"{tgt[0]:02d}.{tgt[1]}"}
     new_col = None
     dup_cols = []
-    # ищем ВО ВСЕХ колонках (не только month_cols), начиная с третьей
+    # ищем В СТРОКЕ ЗАГОЛОВКА hdr_row (а не в первой строке листа)
     for c in range(3, ws.max_column + 1):
-        v = ws.cell(1, c).value
+        v = ws.cell(hdr_row, c).value
         v_txt = str(v).strip().replace(" ", "")
         match = (_month_year(v) == tgt) or (v_txt in tgt_txts)
         if match:
@@ -682,13 +684,13 @@ def _sheet1_extend(ws, ref, month_label, metrics):
     prev_col = new_col - 1
     izm_new = new_col + 1
 
-    # заголовки
-    ws.cell(1, new_col, month_label).font = Font(bold=True)
-    ws.cell(1, izm_new, "Изм в %").font = Font(bold=True)
-    # предыдущий месяц — колонка перед новым (механически, без привязки к названию)
+    # заголовки — тоже в строку заголовка hdr_row
+    ws.cell(hdr_row, new_col, month_label).font = Font(bold=True)
+    ws.cell(hdr_row, izm_new, "Изм в %").font = Font(bold=True)
     prev_month_col = prev_col
 
-    pos = {norm_text(l).replace("потеницал", "потенциал"): r_off + 2
+    pos = {norm_text(l).replace("потеницал", "потенциал"):
+           first_data_row + r_off
            for r_off, l in enumerate(labels)}
 
     def find_row(key):
@@ -699,7 +701,7 @@ def _sheet1_extend(ws, ref, month_label, metrics):
         return None
 
     for r_off, label in enumerate(labels):
-        r = r_off + 2
+        r = first_data_row + r_off
         k = norm_text(label).replace("потеницал", "потенциал")
         L = get_column_letter(new_col)
         if k in MANUAL and MANUAL[k] in metrics and metrics[MANUAL[k]] is not None:
@@ -904,6 +906,7 @@ def update_dinamika_file(reference_bytes, month_label, metrics, main_df):
             if pd.notna(v):
                 ws.cell(i + 1, j + 1, v)
     _sheet1_extend(ws, ref, month_label, metrics)
+    wb.calculation.fullCalcOnLoad = True   # Excel пересчитает формулы при открытии
     buf = BytesIO()
     wb.save(buf)
     buf.seek(0)
