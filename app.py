@@ -702,8 +702,11 @@ def _sheet1_extend(ws, ref, month_label, metrics):
         r = r_off + 2
         k = norm_text(label).replace("потеницал", "потенциал")
         L = get_column_letter(new_col)
-        if k in MANUAL and MANUAL[k] in metrics:
-            c = ws.cell(r, new_col, metrics[MANUAL[k]])
+        if k in MANUAL and MANUAL[k] in metrics and metrics[MANUAL[k]] is not None:
+            # записываем ВЫЧИСЛЕННОЕ значение (не формулу) — чтобы
+            # при скачивании данные были видны сразу, без пересчёта Excel
+            val = metrics[MANUAL[k]]
+            c = ws.cell(r, new_col, round(val, 4) if isinstance(val, float) else val)
             c.number_format = "#,##0.00"
         elif k in DERIVED:
             ws.cell(r, new_col, DERIVED[k].format(
