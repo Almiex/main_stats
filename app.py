@@ -470,15 +470,23 @@ def write_main_report(month_label, main_df, potential_raw, pot_hours,
                     if isinstance(v, str) and v.strip() == "Фреболог":
                         v = "Флеболог"  # опечатка в исходном эталоне
                     ws0.cell(i + 1, j + 1, v)
-        # столбец H (Потенциал) — формула =E*F*G для строк со специализациями,
-        # перезаписываем вместо значений из файла
+        # строки со специализациями: E=C*D, H=E*F*G; строка Итого: суммы по столбцам
         hr0 = find_header_row(potential_raw, must_have=("потенциал", "рабочих часов"))
+        first_spec = hr0 + 2
+        last_spec = None
         for r in range(hr0 + 2, potential_raw.shape[0] + 1):
             spec = str(potential_raw.iloc[r - 1, 1]).strip()
-            if spec and spec.lower() not in ("nan", "none", "специализация") \
-                    and not _is_total(spec):
-                ws0.cell(r, 5, f"=C{r}*D{r}")
-                ws0.cell(r, 8, f"=E{r}*F{r}*G{r}")
+            if spec and spec.lower() not in ("nan", "none", "специализация"):
+                if not _is_total(spec):
+                    ws0.cell(r, 5, f"=C{r}*D{r}")
+                    ws0.cell(r, 8, f"=E{r}*F{r}*G{r}")
+                    last_spec = r
+                else:
+                    # Итого: суммы по всем специализациям
+                    ws0.cell(r, 4, f"=SUM(D{first_spec}:D{last_spec})")
+                    ws0.cell(r, 5, f"=SUM(E{first_spec}:E{last_spec})")
+                    ws0.cell(r, 8, f"=SUM(H{first_spec}:H{last_spec})")
+                    break
     for j in range(1, 10):
         ws0.column_dimensions[get_column_letter(j)].width = 16
     bold = Font(bold=True)
