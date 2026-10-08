@@ -439,23 +439,58 @@ POT_COLUMNS = ["Специализация", "Норма ставки", "Кол�
 
 def parse_potential(df_raw):
     """Таблица потенциала (эталон, загружается файлом).
-    Возвращает (часы_итого, потенциал_итого, сырой df, позиция_строки_итого)."""
+    Возвращает (часы_итого, потенциал_итого, сырой df, позиция_строки_итого).
+    Итоги считаем ПО СТРОКАМ СПЕЦИАЛИЗАЦИЙ: в файлах, сгенерированных
+    openpyxl, строка 'Итого' и столбцы 'Рабочих часов всего'/'Потенциал'
+    — формулы без кэшированных значений, и pandas видит там NaN."""
     hr = find_header_row(df_raw, must_have=("потенциал", "рабочих часов"))
     t = build_table(df_raw, hr)
     c_h = find_col(t.columns, "pot_hours")
     c_r = find_col(t.columns, "pot_revenue")
-    total = t[t.apply(lambda r: any(_is_total(v) for v in r.tolist()),
-                      axis=1)]
-    if total.empty:
+    is_total = t.apply(lambda r: any(_is_total(v) for v in r.tolist()),
+                       axis=1)
+    if not is_total.any():
         raise ValueError("В таблице потенциала не найдена строка 'Итого'.")
-    row = total.iloc[0]
-    hours = float(pd.to_numeric(pd.Series([row[c_h]]),
-                                errors="coerce").fillna(0).iloc[0])
-    revenue = float(pd.to_numeric(pd.Series([row[c_r]]),
-                                  errors="coerce").fillna(0).iloc[0])
+
+    h_num = pd.to_numeric(t[c_h], errors="coerce")
+    r_num = pd.to_numeric(t[c_r], errors="coerce")
+    # 1) сумма по строкам специализаций (без строки Итого)
+    hours = float(h_num[~is_total].fillna(0).sum())
+    revenue = float(r_num[~is_total].fillna(0).sum())
+
+    # 2) файл сгенерирован программно: 'Рабочих часов всего' (=C*D) и
+    #    'Потенциал' (=E*F*G) — формулы без кэшированных значений.
+    #    Пересчитываем из литеральных колонок: часы = ставки*часы_на_ставку,
+    #    потенциал = часы * стоимость часа * целевая загрузка.
+    if hours == 0 or revenue == 0:
+        def _find(*subs, exclude=None):
+            for col in t.columns:
+                n = norm_text(col)
+                if all(s in n for s in subs) and col != exclude:
+                    return col
+            return None
+        c_n = _find("количество", "ставок")
+        c_hd = _find("часов", exclude=c_h)          # часы на одну ставку
+        c_pr = _find("стоимость", "часа")
+        c_ld = _find("целевая", "загрузк")
+        if c_n is not None and c_hd is not None:
+            st = pd.to_numeric(t[c_n], errors="coerce").fillna(0)
+            hd = pd.to_numeric(t[c_hd], errors="coerce").fillna(0)
+            if hours == 0:
+                hours = float((st * hd)[~is_total].sum())
+            if revenue == 0 and c_pr is not None and c_ld is not None:
+                pr = pd.to_numeric(t[c_pr], errors="coerce").fillna(0)
+                ld = pd.to_numeric(t[c_ld], errors="coerce").fillna(0)
+                revenue = float((st * hd * pr * ld)[~is_total].sum())
+
+    # 3) крайний случай: берём саму строку Итого
+    if hours == 0:
+        hours = float(h_num[is_total].fillna(0).sum())
+    if revenue == 0:
+        revenue = float(r_num[is_total].fillna(0).sum())
+
     # позиция строки Итого в исходном df (1-based) для ссылок вида '1. Потенциал'!E14
-    total_idx = total.index[0]
-    pot_total_row = int(total_idx) + 1
+    pot_total_row = int(t.index[is_total][0]) + 1
     return hours, revenue, df_raw, pot_total_row
 
 
@@ -638,9 +673,13 @@ MANUAL = {"мощность в часах": "potential_hours_total",
 
 
 def _sheet1_extend(ws, ref, month_label, metrics):
-    """Лист ДИНАМИКА: новый столбец после последнего месяца."""
+    """Лист ДИНАМИКА: новый столбец после последнего месяца.
+    ВСЕ ячейки нового столбца пишутся ВЫЧИСЛЕННЫМИ ЗНАЧЕНИЯМИ, без формул:
+    openpyxl формулы не считает и кэшированных значений в файле нет, поэтому
+    при просмотре/импорте без пересчёта Excel такие ячейки выглядят пустыми.
+    'Изм в %' тоже считаем в Python по кэшированным значениям прошлого месяца."""
     hdr = next(i for i in range(10) if ref.iloc[i].notna().sum() >= 3)
-    hdr_row = hdr + 1                    # заголовок в 1-based координатах листа
+    hdr_row = hdr + 1                    # строка заголовка на листе (1-based)
     header = ref.iloc[hdr].tolist()
     param_col = next(i for i, v in enumerate(header)
                      if norm_text(v) == "параметр")
@@ -667,8 +706,7 @@ def _sheet1_extend(ws, ref, month_label, metrics):
     for c in range(3, ws.max_column + 1):
         v = ws.cell(hdr_row, c).value
         v_txt = str(v).strip().replace(" ", "")
-        match = (_month_year(v) == tgt) or (v_txt in tgt_txts)
-        if match:
+        if (_month_year(v) == tgt) or (v_txt in tgt_txts):
             if new_col is None:
                 new_col = c
             else:
@@ -684,43 +722,61 @@ def _sheet1_extend(ws, ref, month_label, metrics):
     prev_col = new_col - 1
     izm_new = new_col + 1
 
-    # заголовки — тоже в строку заголовка hdr_row
+    # заголовки — в строку заголовка hdr_row
     ws.cell(hdr_row, new_col, month_label).font = Font(bold=True)
     ws.cell(hdr_row, izm_new, "Изм в %").font = Font(bold=True)
-    prev_month_col = prev_col
 
-    pos = {norm_text(l).replace("потеницал", "потенциал"):
-           first_data_row + r_off
-           for r_off, l in enumerate(labels)}
+    # --- все производные метрики считаем здесь, в Python (не формулами!) ---
+    def _g(k):
+        v = metrics.get(k)
+        return float(v) if v is not None else None
 
-    def find_row(key):
-        key = key.replace("потеницал", "потенциал")
-        for k, r in pos.items():
-            if key in k:
-                return r
-        return None
+    def _div(a, b):
+        if a is None or b is None or b == 0:
+            return None
+        return a / b
+
+    def _pct(a, b):
+        v = _div(a, b)
+        return v * 100 if v is not None else None
+
+    pot_h = _g("potential_hours_total")
+    pot_r = _g("potential_revenue_total")
+    s_sum = _g("main_total_sum")
+    s_hours = _g("main_total_hours_plan")
+    s_hp = _g("main_total_hours_patient")
+    s_fl = _g("main_total_patients")
+    s_vis = _g("main_total_visits")
+    derived_vals = {
+        "коэффициент использования мощности": _pct(s_hours, pot_h),
+        "% достижения потенциала": _pct(s_sum, pot_r),
+        "% загруженности клиники": _pct(s_hp, s_hours),
+        "стоимость помощи на фл": _div(s_sum, s_fl),
+        "посещений на фл": _div(s_vis, s_fl),
+        "стоимость посещения": _div(s_sum, s_vis),
+    }
+
+    # значения предыдущего месяца (для 'Изм в %') берём из ref: pandas
+    # читает кэшированные значения ячеек, поэтому формулы старых месяцев
+    # в референсе нам не мешают
+    prev_vals = pd.to_numeric(body[prev_col - 1], errors="coerce")
 
     for r_off, label in enumerate(labels):
         r = first_data_row + r_off
         k = norm_text(label).replace("потеницал", "потенциал")
-        L = get_column_letter(new_col)
-        if k in MANUAL and MANUAL[k] in metrics and metrics[MANUAL[k]] is not None:
-            # записываем ВЫЧИСЛЕННОЕ значение (не формулу) — чтобы
-            # при скачивании данные были видны сразу, без пересчёта Excel
-            val = metrics[MANUAL[k]]
-            c = ws.cell(r, new_col, round(val, 4) if isinstance(val, float) else val)
+        val = None
+        if k in MANUAL and metrics.get(MANUAL[k]) is not None:
+            val = float(metrics[MANUAL[k]])
+        elif k in derived_vals:
+            val = derived_vals[k]
+        if val is not None:
+            c = ws.cell(r, new_col, round(val, 4))
             c.number_format = "#,##0.00"
-        elif k in DERIVED:
-            ws.cell(r, new_col, DERIVED[k].format(
-                c=L, r_power=find_row("мощность в часах"),
-                r_pot=find_row("потенциал по выручке"),
-                r_sum=find_row("стоимость помощи"),
-                r_hours=find_row("рабочие часы врачей"),
-                r_hp=find_row("часы с пациентом"),
-                r_fl=find_row("фл"), r_vis=find_row("посещений")))
-        Lp = get_column_letter(prev_col)
-        ws.cell(r, izm_new,
-                f'=IFERROR({L}{r}/{Lp}{r}-1,"")').number_format = "0.0%"
+        pv = prev_vals.iloc[r_off] if r_off < len(prev_vals) else None
+        if (val is not None and pv is not None
+                and pd.notna(pv) and float(pv) != 0):
+            ws.cell(r, izm_new,
+                    round(val / float(pv) - 1, 4)).number_format = "0.0%"
     ws.column_dimensions[get_column_letter(new_col)].width = 12
     ws.column_dimensions[get_column_letter(izm_new)].width = 20
 
