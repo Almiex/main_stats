@@ -869,25 +869,21 @@ def _base_extend(ws, ref, month_label, main_df):
 
 
 def update_dinamika_file(reference_bytes, month_label, metrics, main_df):
-    """Загруженный файл «Динамика» -> тот же файл + новый месяц на всех
-    листах. Возвращает bytes обновленного xlsx."""
+    """Загруженный файл «Динамика» -> только первый лист (ДИНАМИКА)
+    с новым месяцем. Лист называется «динамика [месяц]».
+    Возвращает bytes обновленного xlsx."""
     sheets = pd.read_excel(BytesIO(reference_bytes), sheet_name=None,
                            header=None)
+    name0 = list(sheets.keys())[0]
+    ref = sheets[name0]
     wb = Workbook()
     wb.remove(wb.active)
-    for name, ref in sheets.items():
-        n = norm_text(name)
-        ws = wb.create_sheet(title=str(name)[:31])
-        for i, row in ref.iterrows():
-            for j, v in enumerate(row.tolist()):
-                if pd.notna(v):
-                    ws.cell(i + 1, j + 1, v)
-        if "динамика" in n and "врачам" not in n:
-            _sheet1_extend(ws, ref, month_label, metrics)
-        elif "врачам" in n:
-            _sheet2_extend(ws, ref, month_label, main_df)
-        elif "база" in n:
-            _base_extend(ws, ref, month_label, main_df)
+    ws = wb.create_sheet(title=f"динамика {month_label}")
+    for i, row in ref.iterrows():
+        for j, v in enumerate(row.tolist()):
+            if pd.notna(v):
+                ws.cell(i + 1, j + 1, v)
+    _sheet1_extend(ws, ref, month_label, metrics)
     buf = BytesIO()
     wb.save(buf)
     buf.seek(0)
