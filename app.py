@@ -1,5 +1,6 @@
 
 # ================== УТИЛИТЫ И КОНФИГ ==================
+import math
 import re
 from io import BytesIO
 from datetime import date, datetime, timedelta
@@ -42,6 +43,41 @@ doctor_spec_override:
   "якушева е": "Терапевт"
 overload_threshold: 80
 """)
+
+
+# ================== ОФОРМЛЕНИЕ (шрифты, ширины) ==================
+F_BASE = Font(name="Calibri", size=11)
+F_BOLD = Font(name="Calibri", size=11, bold=True)
+
+
+def _cell_disp_text(cell):
+    """Отображаемый текст ячейки (для автоподбора ширины колонки)."""
+    v = cell.value
+    if v is None:
+        return ""
+    if isinstance(v, str) and v.startswith("="):
+        return ""                       # формулы: ширина по заголовку/данным
+    if cell.number_format == "0.0%" and isinstance(v, (int, float)):
+        return f"{v * 100:.1f}%"
+    if isinstance(v, float):
+        return f"{v:.6f}".rstrip("0").rstrip(".")
+    if isinstance(v, (datetime, date)):
+        return v.strftime("%d.%m.%Y")
+    return str(v)
+
+
+def _round_half_up(v):
+    """Округление до целого по правилам Excel: половина — от нуля."""
+    return math.floor(v + 0.5) if v >= 0 else math.ceil(v - 0.5)
+
+
+def _autofit(ws, min_w=6, max_w=45):
+    """Ширина колонок — по длине отображаемого текста."""
+    for col in range(1, ws.max_column + 1):
+        longest = max((len(_cell_disp_text(ws.cell(r, col)))
+                       for r in range(1, ws.max_row + 1)), default=0)
+        ws.column_dimensions[get_column_letter(col)].width = min(
+            max(longest + 2, min_w), max_w)
 
 
 def norm_text(s) -> str:
@@ -554,9 +590,19 @@ def write_main_report(month_label, main_df, potential_raw, pot_hours,
                                      f"=SUM({L(cc)}{first_spec}:"
                                      f"{L(cc)}{last_spec})")
                     break
-    for j in range(1, 10):
-        ws0.column_dimensions[get_column_letter(j)].width = 16
-    bold = Font(bold=True)
+    if potential_raw is not None:
+        # Calibri 11; заголовок и строка Итого — жирные
+        for r in range(1, ws0.max_row + 1):
+            is_hdr = (r == hr0 + 1)
+            is_tot = any(_is_total(str(ws0.cell(r, c).value))
+                         for c in range(1, ws0.max_column + 1)
+                         if ws0.cell(r, c).value is not None)
+            f = F_BOLD if (is_hdr or is_tot) else F_BASE
+            for c in range(1, ws0.max_column + 1):
+                if ws0.cell(r, c).value is not None:
+                    ws0.cell(r, c).font = f
+        _autofit(ws0)
+    bold = F_BOLD
 
     # --- лист 2: Отчет по докторам ---
     EXTRA = ["Главный вывод по врачу", "План действий по врачу"]
@@ -630,8 +676,15 @@ def write_main_report(month_label, main_df, potential_raw, pot_hours,
     # строка r0+6: пусто
     # строка r0+7: Вывод
     ws.cell(r0 + 7, 4, "Вывод").font = bold
-    for j, col in enumerate(headers, start=1):
-        ws.column_dimensions[get_column_letter(j)].width = max(12, len(col) // 2 + 4)
+    # Calibri 11: строки врачей обычные, заголовок и Итого — жирные;
+    # ширина колонок — по отображаемому тексту
+    for r in range(first_r, last_r):
+        for j in range(1, len(headers) + 1):
+            ws.cell(r, j).font = F_BASE
+    for j in range(1, len(headers) + 1):
+        ws.cell(2, j).font = F_BOLD
+        ws.cell(last_r, j).font = F_BOLD
+    _autofit(ws)
     buf = BytesIO()
     wb.save(buf)
     buf.seek(0)
@@ -843,8 +896,9 @@ def _sheet1_extend(ws, ref, month_label, metrics):
             # единый вид с историческими колонками (General: без разделителей
             # тысяч и принудительных нулей — как до сентября);
             # строки 18-19 (Альтернативный потенциал, Разница) — до целого
-            if k in ("альтернативный потенциал", "разница с классическим"):
-                rv = round(val)
+            if k in ("мощность в часах",
+                     "альтернативный потенциал", "разница с классическим"):
+                rv = _round_half_up(val)     # до целого, половина вверх (как в Excel)
             else:
                 rv = round(val, 6)
             c = ws.cell(r, new_col, rv)
@@ -1031,32 +1085,14 @@ def _base_extend(ws, ref, month_label, main_df):
 
 def _sheet1_style(ws):
     """Единый вид листа «Динамика»: тонкие границы по всей таблице
-    и ширина колонок по длине ОТОБРАЖАЕМОГО текста (с учётом форматов:
-    проценты считаются как '-3,2%', а не как '-0,0323')."""
+    и ширина колонок по длине ОТОБРАЖАЕМОГО текста."""
     thin = Side(style="thin", color="000000")
     border = Border(left=thin, right=thin, top=thin, bottom=thin)
     for row in ws.iter_rows(min_row=1, max_row=ws.max_row,
                             min_col=1, max_col=ws.max_column):
         for cell in row:
             cell.border = border
-
-    def _disp(cell):
-        v = cell.value
-        if v is None:
-            return ""
-        if cell.number_format == "0.0%" and isinstance(v, (int, float)):
-            return f"{v * 100:.1f}%"
-        if isinstance(v, float):
-            return f"{v:.6f}".rstrip("0").rstrip(".")
-        if isinstance(v, (datetime, date)):
-            return v.strftime("%d.%m.%Y")
-        return str(v)
-
-    for col in range(1, ws.max_column + 1):
-        longest = max((len(_disp(ws.cell(r, col)))
-                       for r in range(1, ws.max_row + 1)), default=0)
-        ws.column_dimensions[get_column_letter(col)].width = min(
-            max(longest + 2, 6), 45)
+    _autofit(ws)
 
 
 def update_dinamika_file(reference_bytes, month_label, metrics, main_df):
