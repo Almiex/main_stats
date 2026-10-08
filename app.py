@@ -840,16 +840,15 @@ def _sheet1_extend(ws, ref, month_label, metrics):
         elif k in derived_vals:
             val = derived_vals[k]
         if val is not None:
-            rv = round(val, 4)
-            c = ws.cell(r, new_col, rv)
-            # единый вид: без хвостовых нулей (25 212 096; 5 937,5; 6 239,52)
-            r2 = round(rv, 2)
-            if abs(r2 - round(r2)) < 1e-9:
-                c.number_format = "#,##0"
-            elif abs(r2 * 10 - round(r2 * 10)) < 1e-9:
-                c.number_format = "#,##0.0"
+            # единый вид с историческими колонками (General: без разделителей
+            # тысяч и принудительных нулей — как до сентября);
+            # строки 18-19 (Альтернативный потенциал, Разница) — до целого
+            if k in ("альтернативный потенциал", "разница с классическим"):
+                rv = round(val)
             else:
-                c.number_format = "#,##0.00"
+                rv = round(val, 6)
+            c = ws.cell(r, new_col, rv)
+            c.number_format = "General"
         else:
             # строка не рассчитывается (пустая/служебная): стираем старое
             # значение перезаписываемого месяца, чтобы не осталось мусора
