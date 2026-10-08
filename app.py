@@ -649,27 +649,33 @@ def _sheet1_extend(ws, ref, month_label, metrics):
     body = ref.iloc[hdr + 1:].dropna(how="all")
     labels = body[param_col].tolist()
 
-    # вставляем новый столбец в ws (после последнего месяца, перед Изм)
-    insert_at = 3 + len(month_cols)  # 1-based: новый столбец на месте Изм
-    ws.insert_cols(insert_at)
-    new_col = insert_at
+    # ищем существующий столбец с этим месяцем И ГОДОМ — если есть, перезаписываем
+    def _month_year(v):
+        if isinstance(v, (datetime, date)):
+            return (int(v.strftime("%m")), int(v.strftime("%Y")))
+        m = re.match(r"(\d{2})\.(\d{4})", str(v))
+        if m:
+            return (int(m.group(1)), int(m.group(2)))
+        return None
+    tgt = _month_year(month_label)
+    new_col = None
+    for c in month_cols:
+        if _month_year(ws.cell(1, c).value) == tgt:
+            new_col = c + 1
+            break
+    if new_col is None:
+        # вставляем новый столбец (после последнего месяца, перед Изм)
+        insert_at = 3 + len(month_cols)
+        ws.insert_cols(insert_at)
+        new_col = insert_at
     prev_col = new_col - 1
     izm_new = new_col + 1
 
     # заголовки
     ws.cell(1, new_col, month_label).font = Font(bold=True)
-    # предыдущий месяц — последний месяц, ОТЛИЧНЫЙ от нового (защита от повторного запуска)
-    prev_label = None
-    for c in reversed(month_cols):
-        v = ws.cell(1, c).value
-        if _ru_month(v) != _ru_month(month_label):
-            prev_label = v
-            break
-    if prev_label is None:
-        prev_label = ws.cell(1, prev_col).value
-    ws.cell(1, izm_new,
-            f"Изм {_ru_month(month_label)} к {_ru_month(prev_label)} в %"
-            ).font = Font(bold=True)
+    ws.cell(1, izm_new, "Изм в %").font = Font(bold=True)
+    # предыдущий месяц — колонка перед новым (механически, без привязки к названию)
+    prev_month_col = prev_col
 
     pos = {norm_text(l).replace("потеницал", "потенциал"): r_off + 2
            for r_off, l in enumerate(labels)}
