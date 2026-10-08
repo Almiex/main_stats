@@ -9,7 +9,7 @@ import streamlit as st
 import yaml
 from openpyxl import Workbook
 from openpyxl.utils import get_column_letter
-from openpyxl.styles import Font, Alignment, PatternFill
+from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
 
 CFG = yaml.safe_load("""
 columns:
@@ -1027,6 +1027,38 @@ def _base_extend(ws, ref, month_label, main_df):
                 c.number_format = "#,##0.00"
 
 
+
+
+def _sheet1_style(ws):
+    """Единый вид листа «Динамика»: тонкие границы по всей таблице
+    и ширина колонок по длине ОТОБРАЖАЕМОГО текста (с учётом форматов:
+    проценты считаются как '-3,2%', а не как '-0,0323')."""
+    thin = Side(style="thin", color="000000")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+    for row in ws.iter_rows(min_row=1, max_row=ws.max_row,
+                            min_col=1, max_col=ws.max_column):
+        for cell in row:
+            cell.border = border
+
+    def _disp(cell):
+        v = cell.value
+        if v is None:
+            return ""
+        if cell.number_format == "0.0%" and isinstance(v, (int, float)):
+            return f"{v * 100:.1f}%"
+        if isinstance(v, float):
+            return f"{v:.6f}".rstrip("0").rstrip(".")
+        if isinstance(v, (datetime, date)):
+            return v.strftime("%d.%m.%Y")
+        return str(v)
+
+    for col in range(1, ws.max_column + 1):
+        longest = max((len(_disp(ws.cell(r, col)))
+                       for r in range(1, ws.max_row + 1)), default=0)
+        ws.column_dimensions[get_column_letter(col)].width = min(
+            max(longest + 2, 6), 45)
+
+
 def update_dinamika_file(reference_bytes, month_label, metrics, main_df):
     """Загруженный файл «Динамика» -> только первый лист (ДИНАМИКА)
     с новым месяцем. Лист называется «динамика [месяц]».
@@ -1043,6 +1075,7 @@ def update_dinamika_file(reference_bytes, month_label, metrics, main_df):
             if pd.notna(v):
                 ws.cell(i + 1, j + 1, v)
     _sheet1_extend(ws, ref, month_label, metrics)
+    _sheet1_style(ws)                      # границы + ширина колонок по тексту
     wb.calculation.fullCalcOnLoad = True   # Excel пересчитает формулы при открытии
     buf = BytesIO()
     wb.save(buf)
