@@ -658,11 +658,22 @@ def _sheet1_extend(ws, ref, month_label, metrics):
             return (int(m.group(1)), int(m.group(2)))
         return None
     tgt = _month_year(month_label)
+    tgt_txts = {month_label, f"{tgt[0]}.{tgt[1]}", f"{tgt[0]:02d}.{tgt[1]}"}
     new_col = None
-    for c in month_cols:
-        if _month_year(ws.cell(1, c).value) == tgt:
-            new_col = c + 1
-            break
+    dup_cols = []
+    # ищем ВО ВСЕХ колонках (не только month_cols), начиная с третьей
+    for c in range(3, ws.max_column + 1):
+        v = ws.cell(1, c).value
+        v_txt = str(v).strip().replace(" ", "")
+        match = (_month_year(v) == tgt) or (v_txt in tgt_txts)
+        if match:
+            if new_col is None:
+                new_col = c
+            else:
+                dup_cols.append(c)
+    # удаляем дубли (справа налево)
+    for c in sorted(dup_cols, reverse=True):
+        ws.delete_cols(c)
     if new_col is None:
         # вставляем новый столбец (после последнего месяца, перед Изм)
         insert_at = 3 + len(month_cols)
@@ -973,8 +984,10 @@ try:
     if f_dyn:
         dyn_bytes = update_dinamika_file(BytesIO(f_dyn.read()).getvalue(),
                                          month_name, metrics, main_df)
+        import time as _time
+        fname = f"Динамика_{month_name.replace('.', '_')}_{int(_time.time())}.xlsx"
         st.download_button("Скачать обновленную «Динамику» (xlsx)",
-                           dyn_bytes, "Динамика.xlsx")
+                           dyn_bytes, fname)
     else:
         st.info("Загрузите файл «Динамики» предыдущего месяца — получите "
                 "его же с добавленным столбцом нового месяца.")
