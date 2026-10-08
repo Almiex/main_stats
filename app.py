@@ -71,13 +71,18 @@ def _round_half_up(v):
     return math.floor(v + 0.5) if v >= 0 else math.ceil(v - 0.5)
 
 
-def _autofit(ws, min_w=6, max_w=45):
-    """Ширина колонок — по длине отображаемого текста."""
+def _autofit(ws, min_w=6, max_w=45, skip_rows=()):
+    """Ширина колонок — по длине отображаемого текста.
+    skip_rows: строки-заголовки, которые НЕ учитываем (их текст переносится
+    в 2-3 строки wrap_text, чтобы длинный заголовок не растягивал колонку
+    с коротким содержимым)."""
     merged = ws.merged_cells
+    skip = set(skip_rows)
     for col in range(1, ws.max_column + 1):
         longest = max((len(_cell_disp_text(ws.cell(r, col)))
                        for r in range(1, ws.max_row + 1)
-                       if ws.cell(r, col).coordinate not in merged),
+                       if r not in skip
+                       and ws.cell(r, col).coordinate not in merged),
                       default=0)
         ws.column_dimensions[get_column_letter(col)].width = min(
             max(longest + 2, min_w), max_w)
@@ -622,7 +627,14 @@ def write_main_report(month_label, main_df, potential_raw, pot_hours,
             for c in range(1, ws0.max_column + 1):
                 if ws0.cell(r, c).value is not None:
                     ws0.cell(r, c).font = f
-        _autofit(ws0)
+        _autofit(ws0, skip_rows=(hr0 + 1,))
+        # длинные заголовки переносим в 2 строки
+        for c in range(1, ws0.max_column + 1):
+            cell = ws0.cell(hr0 + 1, c)
+            if cell.value is not None:
+                cell.alignment = Alignment(wrap_text=True,
+                                           vertical="center")
+        ws0.row_dimensions[hr0 + 1].height = 30
     bold = F_BOLD
 
     # --- лист 2: Отчет по докторам ---
@@ -712,7 +724,10 @@ def write_main_report(month_label, main_df, potential_raw, pot_hours,
     for j in range(1, len(headers) + 1):
         ws.cell(2, j).font = F_BOLD
         ws.cell(last_r, j).font = F_BOLD
-    _autofit(ws)
+    # ширина — только по таблице (заголовок и блок под таблицей не считаем)
+    _autofit(ws, min_w=8, skip_rows=(2,) + tuple(range(last_r + 1,
+                                                       ws.max_row + 1)))
+    ws.row_dimensions[2].height = 45   # 3 строки под перенесённые заголовки
     buf = BytesIO()
     wb.save(buf)
     buf.seek(0)
