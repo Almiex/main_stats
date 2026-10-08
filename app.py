@@ -643,7 +643,15 @@ def _sheet1_extend(ws, ref, month_label, metrics):
 
     # заголовки
     ws.cell(1, new_col, month_label).font = Font(bold=True)
-    prev_label = ws.cell(1, prev_col).value
+    # предыдущий месяц — последний месяц, ОТЛИЧНЫЙ от нового (защита от повторного запуска)
+    prev_label = None
+    for c in reversed(month_cols):
+        v = ws.cell(1, c).value
+        if _ru_month(v) != _ru_month(month_label):
+            prev_label = v
+            break
+    if prev_label is None:
+        prev_label = ws.cell(1, prev_col).value
     ws.cell(1, izm_new,
             f"Изм {_ru_month(month_label)} к {_ru_month(prev_label)} в %"
             ).font = Font(bold=True)
