@@ -284,7 +284,14 @@ def parse_zagruzka(df_raw, month=None):
 
     def is_excluded_name(doc):
         d = norm_text(doc)
-        return any(k in d for k in CFG.get("exclude_name_keywords", []))
+        if any(k in d for k in CFG.get("exclude_name_keywords", [])):
+            return True
+        # тестовые карточки: 'тест' как ОТДЕЛЬНОЕ слово (не 'Тестова'/'Утестов'
+        # — там 'тест' внутри слова, границы слова не совпадут) или цифра
+        # в ФИО ('Тест Анна 1' — в настоящих ФИО цифр не бывает)
+        if re.search(r"\bтест\b", d) or re.search(r"\d", d):
+            return True
+        return False
 
     def is_doctor_row(r):
         doc = str(r[c_doc]).strip()
@@ -307,8 +314,9 @@ def parse_zagruzka(df_raw, month=None):
             if sp.lower() not in ("", "nan", "none") and cur:
                 spec_map[cur] = sp
         else:
-            if is_doctor_row(r):
-                cur = doctor_key(doc)
+            # служебная/исключённая строка: обрываем цепочку, чтобы дни
+            # такого "врача" не приписались предыдущему
+            cur = doctor_key(doc) if is_doctor_row(r) else None
 
     # Суммы собираем ПО ДНЯМ, а не по строке итога врача: строка итога в
     # отчете включает дни исключаемых специализаций (см. spec_exclude,
@@ -335,6 +343,8 @@ def parse_zagruzka(df_raw, month=None):
             if cur not in fio_map:
                 fio_map[cur] = doc
                 order.append(cur)
+        else:
+            cur = None   # служебная/исключённая строка — обрыв цепочки
 
     uzi_specs = [norm_text(x) for x in CFG.get("visits_uzi_specs", [])]
 
