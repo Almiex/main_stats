@@ -29,7 +29,8 @@ columns:
   date:         ["дата услуги", "дата первой услуги", "дата"]
   pot_hours:    ["рабочих часов всего"]
   pot_revenue:  ["потенциал"]
-service_keep: ["допплер", "узи", "прием", "приём", "эхокг", "эхо кг", "эхо-кг"]
+service_keep: ["допплер", "узи", "прием", "приём", "эхокг", "эхо кг", "эхо-кг",
+               "консультация психолога"]
 to_pay_keep_value: "есть"
 stavka_norm: 148.8
 # подстроки в ФИО: такие строки не врачи (комиссии и пр.)
@@ -64,6 +65,27 @@ def _cell_disp_text(cell):
     if isinstance(v, (datetime, date)):
         return v.strftime("%d.%m.%Y")
     return str(v)
+
+
+def _wrap_words(text):
+    """Перенос заголовка ПО СЛОВАМ (никаких разрывов слов посередине):
+    жадная сборка строк длиной не более самого длинного слова заголовка.
+    Возвращает текст с явными '\n'."""
+    words = str(text).split()
+    if not words:
+        return str(text)
+    max_len = max(len(w) for w in words)
+    lines, cur = [], ""
+    for w in words:
+        cand = w if not cur else cur + " " + w
+        if len(cand) <= max_len:
+            cur = cand
+        else:
+            lines.append(cur)
+            cur = w
+    if cur:
+        lines.append(cur)
+    return "\n".join(lines)
 
 
 def _round_half_up(v):
@@ -431,9 +453,11 @@ def add_calc_columns(df):
 
 def build_main_table(zag, obs, unic_by_doc, perv_by_doc,
                      svod_by_doc, svod_clinic_total, perv_clinic_total=None):
-    """obs_by_spec: DataFrame(key, spec, v) — суммы по парам врач+специализация.
-    Врач с несколькими специализациями -> отдельная строка на каждую;
-    часы/посещения/пациенты только на первой строке (Итого не задваивается)."""
+    """ОДНА строка на врача (без задвоений): если в отчете сумм у врача
+    несколько специализаций (в т.ч. с незаметно разным написанием), их
+    суммы СКЛАДЫВАЮТСЯ, а в ячейке 'Специализация' через запятую в одну
+    строку перечисляются ВСЕ его специализации. Дубли в самом отчете
+    загрузки (тот же ключ врача) тоже склеиваются суммированием часов."""
     obs = obs.copy()
     # переопределение специальностей отдельных врачей (см. CFG)
     ov = {_short_key(k): v for k, v in
@@ -442,32 +466,44 @@ def build_main_table(zag, obs, unic_by_doc, perv_by_doc,
         obs["spec"] = [ov.get(_short_key(k), sp)
                        for k, sp in zip(obs["key"], obs["spec"])]
         obs = obs.groupby(["key", "spec"], as_index=False)["v"].sum()
-    by_key = {k: list(zip(g["spec"], g["v"]))
-              for k, g in obs.groupby("key")} if len(obs) else {}
+    # все специализации врача — одной строкой через запятую;
+    # дубли с незаметно разным написанием (пробелы/регистр) схлопываем
+    def _uniq_specs(specs):
+        seen = {}
+        for x in specs:
+            if x is None or str(x).lower() == "nan":
+                continue
+            x = re.sub(r"\s+", " ", str(x)).strip()
+            if x:
+                seen.setdefault(norm_text(x), x)   # ключ без регистра/пробелов
+        return ", ".join(sorted(seen.values()))
+    spec_joined = (obs.groupby("key")["spec"].apply(_uniq_specs)
+                   if len(obs) else pd.Series(dtype=str))
+    sum_by_key = obs.groupby("key")["v"].sum() if len(obs) else pd.Series(dtype=float)
+
+    # страховка от дублей в самом отчете загрузки: один ключ -> одна строка
+    zag = zag.copy()
+    if zag["key"].duplicated().any():
+        zag = (zag.groupby("key", as_index=False)
+                  .agg({"ФИО врача": "first",
+                        "Специализация": "first",
+                        "Рабочих часов по графику": "sum",
+                        "Время с пациентом": "sum",
+                        "Кол-во посещений": "sum"}))
+
     rows = []
     for _, r in zag.iterrows():
-        specs = by_key.get(r["key"]) or [("", 0.0)]
-        for i, (spec, val) in enumerate(specs):
-            d = r.to_dict()
-            d["Специализация"] = spec
-            d["Стоимость оказанных услуг(руб)"] = val
-            d["_extra"] = i > 0
-            if i > 0:  # доп. специализация: без часов/посещений
-                for c in ("Рабочих часов по графику", "Время с пациентом",
-                          "Кол-во посещений"):
-                    d[c] = 0.0
-            rows.append(d)
+        d = r.to_dict()
+        d["Специализация"] = spec_joined.get(r["key"], "")
+        d["Стоимость оказанных услуг(руб)"] = float(sum_by_key.get(r["key"], 0.0))
+        rows.append(d)
     df = pd.DataFrame(rows)
-    # по ТЗ: по врачам — из "Уникальных пациентов за период"
-    # (выгружать за нужный месяц), Итого по клинике — из сводного
     # Кол-во пациентов: уникальные по каждому врачу из отчета 20
     # (после фильтров; один пациент у нескольких врачей НЕ дублируется,
     # так как сводный расчет идет по врачам)
     df["Кол-во пациентов"] = df["key"].map(svod_by_doc).fillna(0).astype(int)
     df["Кол-во первичных"] = df["key"].map(perv_by_doc).fillna(0).astype(int)
-    if df["_extra"].any():  # пациенты/первичные только на основной строке
-        df.loc[df["_extra"], ["Кол-во пациентов", "Кол-во первичных"]] = 0
-    df = add_calc_columns(df.drop(columns=["key", "_extra"]))
+    df = add_calc_columns(df.drop(columns=["key"]))
     tot = {c: df[c].sum() for c in MAIN_COLUMNS[2:]}
     # Итого по клинике: пациенты — из отчета 20 (сводный, уникальные
     # по клинике: один пациент мог быть у нескольких врачей);
@@ -628,13 +664,16 @@ def write_main_report(month_label, main_df, potential_raw, pot_hours,
                 if ws0.cell(r, c).value is not None:
                     ws0.cell(r, c).font = f
         _autofit(ws0, skip_rows=(hr0 + 1,))
-        # длинные заголовки переносим в 2 строки
+        # заголовки переносим ПО СЛОВАМ (без разрывов слов), высота — по числу строк
+        n_lines = 1
         for c in range(1, ws0.max_column + 1):
             cell = ws0.cell(hr0 + 1, c)
             if cell.value is not None:
+                cell.value = _wrap_words(str(cell.value))
                 cell.alignment = Alignment(wrap_text=True,
                                            vertical="center")
-        ws0.row_dimensions[hr0 + 1].height = 30
+                n_lines = max(n_lines, str(cell.value).count("\n") + 1)
+        ws0.row_dimensions[hr0 + 1].height = n_lines * 15
     bold = F_BOLD
 
     # --- лист 2: Отчет по докторам ---
@@ -650,7 +689,7 @@ def write_main_report(month_label, main_df, potential_raw, pot_hours,
     ws.cell(1, 1).alignment = Alignment(horizontal="center",
                                         vertical="center")
     for j, col in enumerate(headers, start=1):
-        c = ws.cell(2, j, col)
+        c = ws.cell(2, j, _wrap_words(col))   # перенос строго по словам
         c.font = bold
         c.alignment = Alignment(wrap_text=True, vertical="center")
     first_r = 3
@@ -724,10 +763,20 @@ def write_main_report(month_label, main_df, potential_raw, pot_hours,
     for j in range(1, len(headers) + 1):
         ws.cell(2, j).font = F_BOLD
         ws.cell(last_r, j).font = F_BOLD
-    # ширина — только по таблице (заголовок и блок под таблицей не считаем)
+    # ширина — только по таблице (заголовок и блок под таблицей не считаем);
+    # но не уже самого длинного СЛОВА заголовка (иначе Excel разорвёт слово)
     _autofit(ws, min_w=8, skip_rows=(2,) + tuple(range(last_r + 1,
                                                        ws.max_row + 1)))
-    ws.row_dimensions[2].height = 45   # 3 строки под перенесённые заголовки
+    n_lines = 1
+    for j, col in enumerate(headers, start=1):
+        L = get_column_letter(j)
+        words = str(col).split()
+        if words:
+            ws.column_dimensions[L].width = max(
+                ws.column_dimensions[L].width,
+                max(len(w) for w in words) + 2)
+        n_lines = max(n_lines, _wrap_words(col).count("\n") + 1)
+    ws.row_dimensions[2].height = n_lines * 15
     buf = BytesIO()
     wb.save(buf)
     buf.seek(0)
