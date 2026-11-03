@@ -31,6 +31,9 @@ columns:
   pot_revenue:  ["потенциал"]
 service_keep: ["допплер", "узи", "прием", "приём", "эхокг", "эхо кг", "эхо-кг",
                "консультация психолога"]
+# специализации, исключаемые из отчёта ЦЕЛИКОМ (белый список услуг их не
+# покрывает): ни деньги, ни посещения, ни пациенты по ним не считаются
+spec_exclude: ["рентген"]
 to_pay_keep_value: "есть"
 stavka_norm: 148.8
 # подстроки в ФИО: такие строки не врачи (комиссии и пр.)
@@ -307,30 +310,49 @@ def parse_zagruzka(df_raw, month=None):
             if is_doctor_row(r):
                 cur = doctor_key(doc)
 
-    t = t[t.apply(is_doctor_row, axis=1)]
-
-    def num(key):
-        col = find_col(t.columns, key, required=False)
-        if col is None:
-            return 0.0
-        return pd.to_numeric(t[col], errors="coerce").fillna(0)
+    # Суммы собираем ПО ДНЯМ, а не по строке итога врача: строка итога в
+    # отчете включает дни исключаемых специализаций (см. spec_exclude,
+    # напр. рентген), которые по ТЗ в отчет не входят ни в каком виде.
+    excl = [norm_text(x) for x in CFG.get("spec_exclude", [])]
+    hs = num_series("hours_plan")
+    hp_s = num_series("hours_patient")
+    vs = num_series("visits")
+    va = num_series("visits_alt")
+    acc, fio_map, order = {}, {}, []
+    cur = None
+    for idx, r in t.iterrows():
+        doc = str(r[c_doc]).strip()
+        if DATE_RE.match(doc):
+            sp = norm_text(str(r[c_spec]).strip())
+            if cur and not any(e in sp for e in excl):
+                a = acc.setdefault(cur, [0.0, 0.0, 0.0, 0.0])
+                a[0] += float(hs[idx])
+                a[1] += float(hp_s[idx])
+                a[2] += float(vs[idx])
+                a[3] += float(va[idx])
+        elif is_doctor_row(r):
+            cur = doctor_key(doc)
+            if cur not in fio_map:
+                fio_map[cur] = doc
+                order.append(cur)
 
     uzi_specs = [norm_text(x) for x in CFG.get("visits_uzi_specs", [])]
-    is_uzi = t[c_doc].map(doctor_key).map(
-        lambda k: any(u in norm_text(spec_map.get(k, "")) for u in uzi_specs))
-    visits = num("visits")
-    if is_uzi.any():
-        visits = visits.copy()
-        visits[is_uzi] = num("visits_alt")[is_uzi]
 
-    df = pd.DataFrame({
-        "key": t[c_doc].map(doctor_key),
-        "ФИО врача": t[c_doc].astype(str).str.strip(),
-        "Специализация": "",
-        "Рабочих часов по графику": num("hours_plan"),
-        "Время с пациентом": num("hours_patient"),
-        "Кол-во посещений": visits,
-    })
+    def is_uzi(k):
+        return any(u in norm_text(spec_map.get(k, "")) for u in uzi_specs)
+
+    rows = []
+    for k in order:
+        a = acc.get(k, [0.0, 0.0, 0.0, 0.0])
+        rows.append({
+            "key": k,
+            "ФИО врача": fio_map[k],
+            "Специализация": "",
+            "Рабочих часов по графику": a[0],
+            "Время с пациентом": a[1],
+            "Кол-во посещений": a[3] if is_uzi(k) else a[2],
+        })
+    df = pd.DataFrame(rows)
     return df, norm_rate
 
 
@@ -459,7 +481,14 @@ def build_main_table(zag, obs, unic_by_doc, perv_by_doc,
     строку перечисляются ВСЕ его специализации. Дубли в самом отчете
     загрузки (тот же ключ врача) тоже склеиваются суммированием часов."""
     obs = obs.copy()
-    # переопределение специальностей отдельных врачей (см. CFG)
+    # специализации вне белого списка (см. spec_exclude, напр. рентген)
+    # исключаем целиком — из денег тоже: иначе сумма и пациенты
+    # расходятся (деньги есть, пациентов нет)
+    excl = [norm_text(x) for x in CFG.get("spec_exclude", [])]
+    if excl and len(obs):
+        obs = obs[~obs["spec"].map(
+            lambda s: any(e in norm_text(s) for e in excl))]
+    # переопределение специалностей отдельных врачей (см. CFG)
     ov = {_short_key(k): v for k, v in
           (CFG.get("doctor_spec_override") or {}).items()}
     if ov:
